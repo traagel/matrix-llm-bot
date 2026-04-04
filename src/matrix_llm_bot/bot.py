@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import logging
 import mimetypes
 import re
@@ -196,8 +197,9 @@ class MatrixLLMBot:
                 content_type = guessed if guessed and guessed.startswith("image/") else "image/jpeg"
 
             upload_resp, _ = await self.client.upload(
-                image_data,
+                io.BytesIO(image_data),
                 content_type=content_type,
+                filesize=len(image_data),
             )
             if not isinstance(upload_resp, UploadResponse):
                 raise RuntimeError(f"Upload failed: {upload_resp}")
