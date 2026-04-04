@@ -1,0 +1,15 @@
+{
+  "matrix": {
+    "server": "https://matrix.example.com",
+    "username": "llm-bot",
+    "password": "secretpassword"
+  },
+  "ollama": {
+    "url": "http://localhost:11434",
+    "model": "llama3.1:8b"
+  },
+  "rooms": ["!roomid:example.com"],
+  "admins": ["@admin:example.com"],
+  "history_size": 20,
+  "bot_name": "llm-bot"
+}
