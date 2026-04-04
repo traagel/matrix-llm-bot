@@ -178,4 +178,3 @@ matrix-llm-bot/
 ## License
 
 MIT
-# matrix-llm-bot
