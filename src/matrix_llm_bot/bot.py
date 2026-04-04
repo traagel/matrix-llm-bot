@@ -357,7 +357,8 @@ class MatrixLLMBot:
             "Answer the user's question using ONLY this data. "
             "Include exact image tags as versions. "
             "If the answer requires live data (logs, real-time pod status), use the available tools. "
-            "Be brief and factual. No opinions, no explanations."
+            "Reply in plain prose — one or two sentences. "
+            "No JSON, no markdown, no bullet points, no structured data."
         )
         messages: list[dict] = [
             {"role": "system", "content": k8s_system},
