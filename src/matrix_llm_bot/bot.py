@@ -140,19 +140,19 @@ class MatrixLLMBot:
         else:
             history.append({"role": "user", "content": prompt})
 
-        await self.client.room_typing(room.room_id, typing=True, timeout=30_000)
+        await self.client.room_typing(room.room_id, typing_state=True, timeout=30_000)
         try:
             reply = await self._llm_reply(
                 list(history), prompt=prompt, image_b64=image_b64, room=room, sender=event.sender
             )
         except Exception as exc:
             logger.error("LLM error: %s", exc)
-            await self.client.room_typing(room.room_id, typing=False)
+            await self.client.room_typing(room.room_id, typing_state=False)
             await self._send(room.room_id, f"Error: {exc}")
             history.pop()
             return
         finally:
-            await self.client.room_typing(room.room_id, typing=False)
+            await self.client.room_typing(room.room_id, typing_state=False)
 
         history.append({"role": "assistant", "content": reply})
         logger.info("[%s] -> %s", room.room_id, reply[:120])
