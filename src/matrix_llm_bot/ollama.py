@@ -62,7 +62,7 @@ class OllamaClient:
                 "role": "system",
                 "content": (
                     f"You are a routing assistant deciding if a chat message is directly addressed "
-                    f"to '{bot_name}'. "
+                    f"to '{bot_name}' (match the name case-insensitively). "
                     f"Answer YES if '{bot_name}' is the one being spoken to or asked to do something. "
                     f"Answer NO if the message is addressed to someone else, if '{bot_name}' is only "
                     f"mentioned in passing (e.g. 'tell {bot_name} to leave'), or if another name "
