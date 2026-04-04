@@ -281,17 +281,13 @@ class MatrixLLMBot:
 
         # K8s: separate context window — resolve first, inject short result
         if self.k8s and _is_k8s_query(prompt, self.config.k8s_keywords, self.config.k8s_services, self.config.k8s_aliases):
-            if sender in self.config.admins:
-                k8s_context = await self._handle_k8s_query(prompt)
-                if k8s_context:
-                    logger.info("K8s context resolved: %s", k8s_context[:120])
-                    # Inject as a brief system note after the main system prompt
-                    messages.insert(1, {
-                        "role": "system",
-                        "content": f"[Cluster data for your reference: {k8s_context}]",
-                    })
-            else:
-                logger.debug("K8s query from non-admin %s, skipping cluster context", sender)
+            k8s_context = await self._handle_k8s_query(prompt, sender=sender)
+            if k8s_context:
+                logger.info("K8s context resolved: %s", k8s_context[:120])
+                messages.insert(1, {
+                    "role": "system",
+                    "content": f"[Cluster data for your reference: {k8s_context}]",
+                })
 
         # Web search — separate gate
         if not self.search:
@@ -337,7 +333,7 @@ class MatrixLLMBot:
         ]
         return await self.ollama.chat(synthesis_messages)
 
-    async def _handle_k8s_query(self, prompt: str) -> str:
+    async def _handle_k8s_query(self, prompt: str, sender: str | None = None) -> str:
         """Separate context window: resolve a k8s query factually, return a short string."""
         cluster_map = await self._get_cached_cluster_map()
 
@@ -378,10 +374,13 @@ class MatrixLLMBot:
             name = fn.get("name", "")
             args = fn.get("arguments", {})
             logger.info("K8s tool: %s %s", name, args)
-            try:
-                result = await self._execute_k8s_tool(name, args)
-            except Exception as exc:
-                result = f"K8s error: {exc}"
+            if name == "k8s_get_logs" and sender not in self.config.admins:
+                result = "Access denied: only admins can view logs."
+            else:
+                try:
+                    result = await self._execute_k8s_tool(name, args)
+                except Exception as exc:
+                    result = f"K8s error: {exc}"
             messages.append({"role": "tool", "content": result})
 
         return await self.ollama.chat(messages)
