@@ -39,11 +39,6 @@ WEB_SEARCH_TOOL = {
     },
 }
 
-SEARCH_GATE_INSTRUCTION = (
-    "You have access to a web_search tool. "
-    "Only call it when the user explicitly asks for current information, news, prices, or facts you cannot know. "
-    "For greetings, small talk, opinions, or anything you can answer from your own knowledge — respond directly without searching."
-)
 
 
 class MatrixLLMBot:
@@ -189,15 +184,13 @@ class MatrixLLMBot:
         if not self.search:
             return await self.ollama.chat(messages)
 
-        # Inject search discipline instruction before tool calling
-        tool_messages = list(messages)
-        tool_messages[0] = {
-            "role": "system",
-            "content": tool_messages[0]["content"] + "\n\n" + SEARCH_GATE_INSTRUCTION,
-        }
+        # Hard gate: only enter tool-calling flow if search is actually needed
+        needs_search = await self.ollama.should_search(prompt)
+        if not needs_search:
+            return await self.ollama.chat(messages)
 
-        # Tool calling: let the model decide if it needs to search
-        msg = await self.ollama.chat_with_tools(tool_messages, [WEB_SEARCH_TOOL])
+        # Tool calling
+        msg = await self.ollama.chat_with_tools(messages, [WEB_SEARCH_TOOL])
         tool_calls = msg.get("tool_calls") or []
 
         if not tool_calls:

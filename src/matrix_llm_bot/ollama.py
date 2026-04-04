@@ -28,6 +28,30 @@ class OllamaClient:
         response.raise_for_status()
         return response.json()["message"]["content"]
 
+    async def should_search(self, message: str) -> bool:
+        """Decide if a message requires a web search to answer."""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You decide if a message requires a web search to answer. "
+                    "Answer YES only if the message asks for current news, live data, prices, weather, "
+                    "recent events, or facts that change over time and require up-to-date information. "
+                    "Answer NO for greetings, small talk, opinions, questions about past conversations, "
+                    "general knowledge, or anything that does not need real-time data. "
+                    "Reply with a single word: YES or NO. Nothing else."
+                ),
+            },
+            {"role": "user", "content": message},
+        ]
+        response = await self._client.post(
+            f"{self.url}/api/chat",
+            json={"model": self.model, "messages": messages, "stream": False},
+        )
+        response.raise_for_status()
+        answer = response.json()["message"]["content"].strip().upper()
+        return answer.startswith("Y")
+
     async def should_respond(self, bot_name: str, message: str) -> bool:
         """Ask the model if this message is actually directed at bot_name."""
         messages = [
