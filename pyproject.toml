@@ -1,11 +1,12 @@
 [project]
 name = "matrix-llm-bot"
-version = "0.5.8"
+version = "0.6.0"
 description = "Matrix chat bot that forwards messages to a local Ollama instance for LLM inference"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.28.1",
+    "kubernetes-asyncio>=35.0.1",
     "matrix-nio>=0.25.2",
 ]
 

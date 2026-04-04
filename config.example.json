@@ -15,5 +15,6 @@
   "history_size": 20,
   "bot_name": "llm-bot",
   "system_prompt": "",
-  "searxng_url": "http://searxng:8080"
+  "searxng_url": "http://searxng:8080",
+  "k8s_enabled": false
 }

@@ -30,6 +30,7 @@ class Config:
     bot_name: str
     system_prompt: str = ""
     searxng_url: str = ""
+    k8s_enabled: bool = False
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":
@@ -66,4 +67,5 @@ class Config:
             bot_name=data.get("bot_name", "llm-bot"),
             system_prompt=data.get("system_prompt", ""),
             searxng_url=data.get("searxng_url", ""),
+            k8s_enabled=bool(data.get("k8s_enabled", False)),
         )
