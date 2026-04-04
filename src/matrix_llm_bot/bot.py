@@ -102,6 +102,14 @@ K8S_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "k8s_cluster_map",
+            "description": "Get a full map of the k3s cluster showing all namespaces, deployments, their images/versions, and services.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
 
 WEB_SEARCH_TOOL = {
@@ -132,6 +140,8 @@ class MatrixLLMBot:
         self.ollama = OllamaClient(config.ollama.url, config.ollama.model, config.ollama.routing_model)
         self.search = SearXNGClient(config.searxng_url) if config.searxng_url else None
         self.k8s = K8sClient() if config.k8s_enabled else None
+        self._cluster_map_cache: str = ""
+        self._cluster_map_cache_time: float = 0.0
         self._history: dict[tuple[str, str], deque[dict]] = {}
         # (room_id, sender) -> (image_bytes, timestamp)  — keyed per sender, not per room
         self._pending_images: dict[tuple[str, str], tuple[bytes, float]] = {}
@@ -163,6 +173,8 @@ class MatrixLLMBot:
         finally:
             if self.search:
                 await self.search.aclose()
+            if self.k8s:
+                await self.k8s.aclose()
             await self.ollama.aclose()
             await self.client.close()
 
@@ -267,6 +279,22 @@ class MatrixLLMBot:
         room_id = room.room_id if room else None
         messages = list(history)
         system = _build_system_prompt(self.config.system_prompt, room=room, sender=sender)
+
+        # Inject cluster map when query is k8s-related
+        if self.k8s and _is_k8s_query(prompt, self.config.k8s_keywords, self.config.k8s_services):
+            cluster_ctx = await self._get_cached_cluster_map()
+            system = (
+                system
+                + "\n\n--- CLUSTER CONTEXT (current state) ---\n"
+                + cluster_ctx
+                + "\n---\n"
+                "Use this context to answer k8s questions accurately. "
+                "Service names map to deployments in specific namespaces. "
+                "The image tag after ':' is the running version. "
+                "DOWN means unhealthy. Do NOT hallucinate — only report what is shown above. "
+                "If something is not in the cluster map, say you don't see it."
+            )
+
         messages.insert(0, {"role": "system", "content": system})
 
         if image_b64:
@@ -340,6 +368,8 @@ class MatrixLLMBot:
                         result = await self.k8s.get_deployments(args.get("namespace", ""))
                     elif name == "k8s_get_services":
                         result = await self.k8s.get_services(args.get("namespace", ""))
+                    elif name == "k8s_cluster_map":
+                        result = await self.k8s.cluster_map()
                     else:
                         result = f"Unknown k8s tool: {name}"
                     tool_blocks.append(result)
@@ -357,6 +387,14 @@ class MatrixLLMBot:
             {"role": "tool", "content": "\n\n---\n\n".join(tool_blocks)},
         ]
         return await self.ollama.chat(synthesis_messages)
+
+    async def _get_cached_cluster_map(self) -> str:
+        now = time.monotonic()
+        if self._cluster_map_cache and (now - self._cluster_map_cache_time) < 60:
+            return self._cluster_map_cache
+        self._cluster_map_cache = await self.k8s.cluster_map()
+        self._cluster_map_cache_time = now
+        return self._cluster_map_cache
 
     async def _handle_admin_command(self, room_id: str, prompt: str) -> bool:
         """Returns True if the prompt was an admin command and has been handled."""
@@ -409,6 +447,12 @@ class MatrixLLMBot:
         if key not in self._history:
             self._history[key] = deque(maxlen=self.config.history_size)
         return self._history[key]
+
+
+def _is_k8s_query(prompt: str, keywords: list[str], services: list[str]) -> bool:
+    words = set(re.sub(r"[^\w\s-]", " ", prompt.lower()).split())
+    all_terms = set(k.lower() for k in keywords) | set(s.lower() for s in services)
+    return bool(words & all_terms)
 
 
 _EXPLICIT_SEARCH_PATTERNS = re.compile(
