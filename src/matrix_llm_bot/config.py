@@ -27,6 +27,8 @@ class Config:
     history_size: int
     bot_name: str
     system_prompt: str = ""
+    vision_model: str = ""
+    searxng_url: str = ""
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":
@@ -60,4 +62,6 @@ class Config:
             history_size=int(data.get("history_size", 20)),
             bot_name=data.get("bot_name", "llm-bot"),
             system_prompt=data.get("system_prompt", ""),
+            vision_model=data.get("vision_model", ""),
+            searxng_url=data.get("searxng_url", ""),
         )

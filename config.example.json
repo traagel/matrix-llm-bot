@@ -12,5 +12,7 @@
   "admins": ["@admin:example.com"],
   "history_size": 20,
   "bot_name": "llm-bot",
-  "system_prompt": ""
+  "system_prompt": "",
+  "vision_model": "llava:7b",
+  "searxng_url": "http://searxng:8080"
 }
