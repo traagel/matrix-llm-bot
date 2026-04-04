@@ -1,15 +1,20 @@
 # matrix-llm-bot
 
-A simple Matrix chat bot that forwards messages to a local [Ollama](https://ollama.com) instance for LLM inference. Responds to messages in configured rooms, maintains per-user conversation history, and posts replies back to the room.
+A Matrix chat bot that forwards messages to a local [Ollama](https://ollama.com) instance for LLM inference. Supports web search via SearXNG, image vision, Kubernetes cluster monitoring, and per-user conversation history.
 
 ## Features
 
-- Logs into a Matrix homeserver with username/password
-- Joins configured rooms on startup
-- Responds to `.ai <message>` or `<bot_name>: <message>` prefixes
-- Sends messages to Ollama's `/api/chat` endpoint
-- Maintains per-user, per-room conversation history (in-memory, configurable size)
-- Skips backlog — only processes messages arriving after startup
+- Responds when mentioned by name or @mentioned in a room
+- LLM gate — decides if the message is actually addressed to the bot before responding
+- Per-user, per-room conversation history (in-memory, configurable size)
+- **Web search** via SearXNG with Ollama tool calling — model decides when to search
+- **Image vision** — send an image, then ask the bot about it
+- **Kubernetes monitoring** — query pod status, deployments, logs, and versions directly from chat
+- Persona via `system_prompt` — give the bot a character
+- `reset` command clears your conversation history
+- Admin commands: `avatar <url>` sets the bot's profile picture
+- Skips message backlog on startup
+- @mentions sender in replies for clear attribution
 - Unencrypted rooms only (no E2EE)
 
 ## Requirements
@@ -22,14 +27,12 @@ A simple Matrix chat bot that forwards messages to a local [Ollama](https://olla
 ## Installation
 
 ```bash
-git clone https://github.com/youruser/matrix-llm-bot
+git clone https://github.com/traagel/matrix-llm-bot
 cd matrix-llm-bot
 uv sync
 ```
 
 ## Configuration
-
-Copy the example config and fill in your values:
 
 ```bash
 cp config.example.json config.json
@@ -38,103 +41,122 @@ cp config.example.json config.json
 ```json
 {
   "matrix": {
-    "server": "https://matrix.example.com",
-    "username": "llm-bot",
+    "server": "http://localhost:8008",
+    "username": "@bot:example.com",
     "password": "secretpassword"
   },
   "ollama": {
     "url": "http://localhost:11434",
-    "model": "llama3.1:8b"
+    "model": "llama3.1:8b",
+    "vision_model": "llava:7b",
+    "routing_model": "llama3.2:1b"
   },
   "rooms": ["!roomid:example.com"],
   "admins": ["@admin:example.com"],
   "history_size": 20,
-  "bot_name": "llm-bot"
+  "bot_name": "llm-bot",
+  "system_prompt": "",
+  "searxng_url": "http://searxng:8080",
+  "k8s_enabled": false,
+  "k8s_services": ["myapp", "mydb", "myproxy"],
+  "k8s_keywords": [],
+  "k8s_aliases": {
+    "custom-name": "actual-deployment-name"
+  }
 }
 ```
 
-| Field | Description |
-|---|---|
-| `matrix.server` | URL of your Matrix homeserver |
-| `matrix.username` | Bot's full Matrix user ID (e.g. `@llm-bot:example.com`) |
-| `matrix.password` | Bot's Matrix password |
-| `ollama.url` | Base URL of your Ollama instance |
-| `ollama.model` | Model name to use (e.g. `llama3.1:8b`, `mistral`) |
-| `rooms` | List of room IDs the bot should join |
-| `admins` | List of Matrix user IDs with admin privileges |
-| `history_size` | Number of messages to keep per user per room |
-| `bot_name` | Display name prefix used to address the bot |
+### Config reference
+
+| Field | Required | Description |
+|---|---|---|
+| `matrix.server` | Yes | URL of your Matrix homeserver |
+| `matrix.username` | Yes | Bot's full Matrix user ID (`@bot:example.com`) |
+| `matrix.password` | Yes | Bot's Matrix password |
+| `ollama.url` | Yes | Base URL of your Ollama instance |
+| `ollama.model` | Yes | Main chat model (e.g. `llama3.1:8b`) |
+| `ollama.vision_model` | No | Vision model for image analysis (e.g. `llava:7b`). Omit to disable. |
+| `ollama.routing_model` | No | Small fast model for yes/no gate calls (e.g. `llama3.2:1b`). Falls back to main model. |
+| `rooms` | Yes | List of room IDs the bot should join |
+| `admins` | No | Matrix user IDs with admin privileges (avatar command, k8s logs) |
+| `history_size` | No | Messages to keep per user per room (default: 20) |
+| `bot_name` | No | Display name set on login, also used as mention trigger |
+| `system_prompt` | No | Persona/instructions prepended to every LLM call |
+| `searxng_url` | No | SearXNG base URL. Omit to disable web search. |
+| `k8s_enabled` | No | Enable Kubernetes monitoring tools (default: false) |
+| `k8s_services` | No | Service names that trigger k8s context injection (e.g. `["jellyfin", "postgres"]`) |
+| `k8s_keywords` | No | Trigger words for k8s context injection. Omit to use built-in defaults; set to `[]` to disable keyword matching entirely. |
+| `k8s_aliases` | No | Map custom names to real deployment names (e.g. `{"myflix": "jellyfin"}`) |
 
 ## Running
 
 ```bash
 uv run python -m matrix_llm_bot --config config.json
-```
-
-Optional flag:
-
-```
---log-level DEBUG   # default: INFO
+# or
+matrix-llm-bot --config config.json --log-level DEBUG
 ```
 
 ## Usage
 
-In any configured room, address the bot with:
+Address the bot by name or @mention:
 
 ```
-.ai What is the capital of France?
+llm-bot what's the weather in Tokyo?
+@llm-bot explain how transformers work
+llm-bot reset
 ```
 
-or
-
+**Web search** — triggered automatically when the model needs current info, or explicitly:
 ```
-llm-bot: explain async/await in Python
+llm-bot search for the latest Rust release notes
 ```
 
-The bot replies in the same room and remembers the conversation history per user.
+**Images** — send an image to the room, then mention the bot:
+```
+[upload image]
+llm-bot what's in this image?
+```
+
+**Kubernetes** (admins and non-admins can check status; only admins can view logs):
+```
+llm-bot is jellyfin healthy?
+llm-bot show me pods in the media namespace
+llm-bot get logs for the ollama pod       ← admins only
+```
 
 ## Docker
 
-Build and run with Docker:
-
 ```bash
-docker build -t matrix-llm-bot .
-docker run -v /path/to/your/config.json:/data/config.json matrix-llm-bot
+docker build -t traagel/matrix-llm-bot:latest .
+docker run -v /path/to/config.json:/data/config.json traagel/matrix-llm-bot:latest
 ```
 
 ## Kubernetes / k3s
 
-Example deployment — mount your `config.json` as a Secret:
+Mount `config.json` as a Secret. The bot auto-detects in-cluster credentials when `k8s_enabled: true`.
 
 ```yaml
 apiVersion: v1
 kind: Secret
 metadata:
   name: matrix-llm-bot-config
-  namespace: matrix
+  namespace: myns
 stringData:
   config.json: |
     {
-      "matrix": {
-        "server": "http://tuwunel.matrix.svc.cluster.local:8008",
-        "username": "llm-bot",
-        "password": "secretpassword"
-      },
-      "ollama": {
-        "url": "http://ollama.ollama.svc.cluster.local:11434",
-        "model": "llama3.1:8b"
-      },
+      "matrix": { "server": "http://homeserver:8008", "username": "@bot:example.com", "password": "..." },
+      "ollama": { "url": "http://ollama:11434", "model": "llama3.1:8b" },
       "rooms": ["!roomid:example.com"],
       "admins": ["@admin:example.com"],
-      "history_size": 20,
-      "bot_name": "llm-bot"
+      "bot_name": "llm-bot",
+      "k8s_enabled": true
     }
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: matrix-llm-bot
-  namespace: matrix
+  namespace: myns
 spec:
   replicas: 1
   selector:
@@ -145,9 +167,10 @@ spec:
       labels:
         app: matrix-llm-bot
     spec:
+      serviceAccountName: matrix-llm-bot
       containers:
         - name: bot
-          image: youruser/matrix-llm-bot:latest
+          image: traagel/matrix-llm-bot:latest
           volumeMounts:
             - name: config
               mountPath: /data
@@ -158,7 +181,36 @@ spec:
             secretName: matrix-llm-bot-config
 ```
 
-> Keep `replicas: 1` — the bot holds conversation history in memory, multiple replicas would each have an independent state.
+> Keep `replicas: 1` — history is in-memory, multiple replicas would each have independent state.
+
+**RBAC** required when `k8s_enabled: true`:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: matrix-llm-bot
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, services, namespaces]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: matrix-llm-bot
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: matrix-llm-bot
+subjects:
+  - kind: ServiceAccount
+    name: matrix-llm-bot
+    namespace: myns
+```
 
 ## Project structure
 
@@ -172,6 +224,8 @@ matrix-llm-bot/
     ├── __main__.py   # CLI entrypoint
     ├── bot.py        # Matrix client, sync loop, message handler
     ├── ollama.py     # Async Ollama API client
+    ├── search.py     # SearXNG client
+    ├── k8s.py        # Kubernetes API client
     └── config.py     # Config loading and validation
 ```
 
