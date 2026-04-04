@@ -280,6 +280,7 @@ class MatrixLLMBot:
             )
 
         # K8s: separate context window — resolve first, inject short result
+        k8s_resolved = False
         if self.k8s and _is_k8s_query(prompt, self.config.k8s_keywords, self.config.k8s_services, self.config.k8s_aliases):
             k8s_context = await self._handle_k8s_query(prompt, sender=sender)
             if k8s_context:
@@ -288,9 +289,10 @@ class MatrixLLMBot:
                     "role": "system",
                     "content": f"[Cluster data for your reference: {k8s_context}]",
                 })
+                k8s_resolved = True
 
-        # Web search — separate gate
-        if not self.search:
+        # Web search — skip entirely if k8s already answered the question
+        if k8s_resolved or not self.search:
             return await self.ollama.chat(messages)
 
         if not _explicit_search_request(prompt):
