@@ -35,10 +35,12 @@ class OllamaClient:
                 "role": "system",
                 "content": (
                     "You decide if a message requires a web search to answer. "
-                    "Answer YES only if the message asks for current news, live data, prices, weather, "
-                    "recent events, or facts that change over time and require up-to-date information. "
-                    "Answer NO for greetings, small talk, opinions, questions about past conversations, "
-                    "general knowledge, or anything that does not need real-time data. "
+                    "Answer YES only if the message explicitly asks for: current news, live prices, "
+                    "today's weather, recent events, or time-sensitive facts you cannot know. "
+                    "Answer NO for: greetings, small talk, opinions, jokes, questions about what was "
+                    "previously said in the conversation, memory questions ('what did I tell you', "
+                    "'do you remember'), personal questions, or anything answerable from general knowledge. "
+                    "When in doubt, answer NO. "
                     "Reply with a single word: YES or NO. Nothing else."
                 ),
             },
@@ -58,8 +60,12 @@ class OllamaClient:
             {
                 "role": "system",
                 "content": (
-                    f"You are a routing assistant. Your only job is to decide if a chat message "
-                    f"is directly addressed to or intended for '{bot_name}'. "
+                    f"You are a routing assistant deciding if a chat message is directly addressed "
+                    f"to '{bot_name}'. "
+                    f"Answer YES if '{bot_name}' is the one being spoken to or asked to do something. "
+                    f"Answer NO if the message is addressed to someone else, if '{bot_name}' is only "
+                    f"mentioned in passing (e.g. 'tell {bot_name} to leave'), or if another name "
+                    f"appears at the start of the message as the primary addressee. "
                     f"Reply with a single word: YES or NO. Nothing else."
                 ),
             },

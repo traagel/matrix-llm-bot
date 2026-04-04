@@ -50,6 +50,7 @@ class MatrixLLMBot:
         self._history: dict[tuple[str, str], deque[dict]] = {}
         # (room_id, sender) -> (image_bytes, timestamp)  — keyed per sender, not per room
         self._pending_images: dict[tuple[str, str], tuple[bytes, float]] = {}
+        self._seen_events: set[str] = set()
         self._started = False
 
     async def run(self) -> None:
@@ -100,6 +101,13 @@ class MatrixLLMBot:
             return
         if event.sender == self.client.user_id:
             return
+
+        # Deduplicate — nio can deliver the same event more than once
+        if event.event_id in self._seen_events:
+            return
+        self._seen_events.add(event.event_id)
+        if len(self._seen_events) > 2000:
+            self._seen_events.clear()
 
         body = event.body.strip()
         prompt = _extract_prompt(body, self.config.bot_name, self.client.user_id, event.source)
