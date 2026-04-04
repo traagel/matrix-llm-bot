@@ -17,6 +17,7 @@ class OllamaConfig:
     url: str
     model: str
     vision_model: str = ""
+    routing_model: str = ""
 
 
 @dataclass
@@ -57,6 +58,7 @@ class Config:
                 url=ollama["url"],
                 model=ollama["model"],
                 vision_model=ollama.get("vision_model", ""),
+                routing_model=ollama.get("routing_model", ""),
             ),
             rooms=data.get("rooms", []),
             admins=data.get("admins", []),

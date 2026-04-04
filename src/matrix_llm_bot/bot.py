@@ -45,7 +45,7 @@ class MatrixLLMBot:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.client = AsyncClient(config.matrix.server, config.matrix.username)
-        self.ollama = OllamaClient(config.ollama.url, config.ollama.model)
+        self.ollama = OllamaClient(config.ollama.url, config.ollama.model, config.ollama.routing_model)
         self.search = SearXNGClient(config.searxng_url) if config.searxng_url else None
         self._history: dict[tuple[str, str], deque[dict]] = {}
         # (room_id, sender) -> (image_bytes, timestamp)  — keyed per sender, not per room
@@ -192,10 +192,11 @@ class MatrixLLMBot:
         if not self.search:
             return await self.ollama.chat(messages)
 
-        # Hard gate: only enter tool-calling flow if search is actually needed
-        needs_search = await self.ollama.should_search(prompt)
-        if not needs_search:
-            return await self.ollama.chat(messages)
+        # Bypass gate if user explicitly requests a search
+        if not _explicit_search_request(prompt):
+            needs_search = await self.ollama.should_search(prompt)
+            if not needs_search:
+                return await self.ollama.chat(messages)
 
         # Tool calling
         msg = await self.ollama.chat_with_tools(messages, [WEB_SEARCH_TOOL])
@@ -287,6 +288,15 @@ class MatrixLLMBot:
         if key not in self._history:
             self._history[key] = deque(maxlen=self.config.history_size)
         return self._history[key]
+
+
+_EXPLICIT_SEARCH_PATTERNS = re.compile(
+    r"\b(search|look\s+it\s+up|look\s+up|use\s+the\s+internet|google|find\s+out|check\s+online|browse)\b",
+    re.IGNORECASE,
+)
+
+def _explicit_search_request(prompt: str) -> bool:
+    return bool(_EXPLICIT_SEARCH_PATTERNS.search(prompt))
 
 
 def _build_system_prompt(

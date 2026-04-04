@@ -4,9 +4,10 @@ import httpx
 
 
 class OllamaClient:
-    def __init__(self, url: str, model: str) -> None:
+    def __init__(self, url: str, model: str, routing_model: str = "") -> None:
         self.url = url.rstrip("/")
         self.model = model
+        self._routing_model = routing_model or model
         self._client = httpx.AsyncClient(timeout=120.0)
 
     async def chat(self, messages: list[dict], model: str | None = None) -> str:
@@ -40,7 +41,7 @@ class OllamaClient:
                     "Answer NO for: greetings, small talk, opinions, jokes, questions about what was "
                     "previously said in the conversation, memory questions ('what did I tell you', "
                     "'do you remember'), personal questions, or anything answerable from general knowledge. "
-                    "When in doubt, answer NO. "
+                    "If the message asks about current events, prices, or news — answer YES. "
                     "Reply with a single word: YES or NO. Nothing else."
                 ),
             },
@@ -48,7 +49,7 @@ class OllamaClient:
         ]
         response = await self._client.post(
             f"{self.url}/api/chat",
-            json={"model": self.model, "messages": messages, "stream": False},
+            json={"model": self._routing_model, "messages": messages, "stream": False},
         )
         response.raise_for_status()
         answer = response.json()["message"]["content"].strip().upper()
@@ -73,7 +74,7 @@ class OllamaClient:
         ]
         response = await self._client.post(
             f"{self.url}/api/chat",
-            json={"model": self.model, "messages": messages, "stream": False},
+            json={"model": self._routing_model, "messages": messages, "stream": False},
         )
         response.raise_for_status()
         answer = response.json()["message"]["content"].strip().upper()
@@ -95,7 +96,7 @@ class OllamaClient:
         ]
         response = await self._client.post(
             f"{self.url}/api/chat",
-            json={"model": self.model, "messages": messages, "stream": False},
+            json={"model": self._routing_model, "messages": messages, "stream": False},
         )
         response.raise_for_status()
         return response.json()["message"]["content"]
