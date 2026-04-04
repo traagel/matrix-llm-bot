@@ -1,6 +1,6 @@
 [project]
 name = "matrix-llm-bot"
-version = "0.5.3"
+version = "0.5.4"
 description = "Matrix chat bot that forwards messages to a local Ollama instance for LLM inference"
 readme = "README.md"
 requires-python = ">=3.11"

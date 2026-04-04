@@ -24,7 +24,11 @@ WEB_SEARCH_TOOL = {
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": "Search the web for current information, news, or facts you don't know.",
+        "description": (
+            "Search the web for current, real-time, or factual information you do not already know. "
+            "Only use this for explicit questions about news, current events, prices, weather, or facts. "
+            "Do NOT use for greetings, casual conversation, opinions, or anything you can answer yourself."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -34,6 +38,12 @@ WEB_SEARCH_TOOL = {
         },
     },
 }
+
+SEARCH_GATE_INSTRUCTION = (
+    "You have access to a web_search tool. "
+    "Only call it when the user explicitly asks for current information, news, prices, or facts you cannot know. "
+    "For greetings, small talk, opinions, or anything you can answer from your own knowledge — respond directly without searching."
+)
 
 
 class MatrixLLMBot:
@@ -179,8 +189,15 @@ class MatrixLLMBot:
         if not self.search:
             return await self.ollama.chat(messages)
 
+        # Inject search discipline instruction before tool calling
+        tool_messages = list(messages)
+        tool_messages[0] = {
+            "role": "system",
+            "content": tool_messages[0]["content"] + "\n\n" + SEARCH_GATE_INSTRUCTION,
+        }
+
         # Tool calling: let the model decide if it needs to search
-        msg = await self.ollama.chat_with_tools(messages, [WEB_SEARCH_TOOL])
+        msg = await self.ollama.chat_with_tools(tool_messages, [WEB_SEARCH_TOOL])
         tool_calls = msg.get("tool_calls") or []
 
         if not tool_calls:
