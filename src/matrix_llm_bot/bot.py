@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import html as html_module
 import io
 import logging
 import mimetypes
@@ -242,7 +243,7 @@ class MatrixLLMBot:
         else:
             history.append({"role": "user", "content": prompt})
 
-        await self.client.room_typing(room.room_id, typing_state=True, timeout=30_000)
+        await self.client.room_typing(room.room_id, typing_state=True, timeout=120_000)
         try:
             reply = await self._llm_reply(
                 list(history), prompt=prompt, image_b64=image_b64,
@@ -259,7 +260,7 @@ class MatrixLLMBot:
 
         history.append({"role": "assistant", "content": reply})
         logger.info("[%s] -> %s", room.room_id, reply[:120])
-        await self._send(room.room_id, reply)
+        await self._send_reply(room, event.sender, reply)
 
     async def _llm_reply(
         self,
@@ -282,6 +283,12 @@ class MatrixLLMBot:
         # K8s: separate context window — resolve first, inject short result
         k8s_resolved = False
         if self.k8s and _is_k8s_query(prompt, self.config.k8s_keywords, self.config.k8s_services, self.config.k8s_aliases):
+            if room_id:
+                try:
+                    ack = await self.ollama.acknowledgment(system, "the cluster status")
+                    await self._send(room_id, ack)
+                except Exception:
+                    pass
             k8s_context = await self._handle_k8s_query(prompt, sender=sender)
             if k8s_context:
                 logger.info("K8s context resolved: %s", k8s_context[:120])
@@ -450,6 +457,28 @@ class MatrixLLMBot:
         except Exception as exc:
             logger.error("Failed to set avatar: %s", exc)
             await self._send(room_id, f"Failed to set avatar: {exc}")
+
+    async def _send_reply(self, room: MatrixRoom, sender: str, text: str) -> None:
+        """Send a response with an @mention of the sender."""
+        display_name = (
+            room.users[sender].display_name
+            if sender in room.users and room.users[sender].display_name
+            else sender
+        )
+        plain = f"{display_name}: {text}"
+        mention_html = f'<a href="https://matrix.to/#/{html_module.escape(sender)}">{html_module.escape(display_name)}</a>'
+        formatted = f"{mention_html}: {html_module.escape(text)}"
+        await self.client.room_send(
+            room.room_id,
+            message_type="m.room.message",
+            content={
+                "msgtype": "m.text",
+                "body": plain,
+                "format": "org.matrix.custom.html",
+                "formatted_body": formatted,
+                "m.mentions": {"user_ids": [sender]},
+            },
+        )
 
     async def _send(self, room_id: str, text: str) -> None:
         await self.client.room_send(
