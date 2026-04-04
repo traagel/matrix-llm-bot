@@ -169,6 +169,20 @@ class MatrixLLMBot:
                 )
                 messages.append({"role": "tool", "content": tool_result})
 
+        # Inject search synthesis instruction into the system prompt for the final call
+        search_instruction = (
+            "You have been given web search results above. "
+            "Synthesize the information into a clear, concise answer. "
+            "Do not list raw URLs or copy-paste snippets — respond naturally."
+        )
+        if messages and messages[0]["role"] == "system":
+            messages[0] = {
+                "role": "system",
+                "content": messages[0]["content"] + "\n\n" + search_instruction,
+            }
+        else:
+            messages.insert(0, {"role": "system", "content": search_instruction})
+
         return await self.ollama.chat(messages)
 
     async def _handle_admin_command(self, room_id: str, prompt: str) -> bool:
