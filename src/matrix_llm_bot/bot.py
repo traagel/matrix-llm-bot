@@ -3,15 +3,18 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import time
 from collections import deque
 
-from nio import AsyncClient, DownloadResponse, MatrixRoom, RoomMessageImage, RoomMessageText
+from nio import AsyncClient, MatrixRoom, RoomMessageImage, RoomMessageText
 
 from .config import Config
 from .ollama import OllamaClient
 from .search import SearXNGClient
 
 logger = logging.getLogger(__name__)
+
+IMAGE_TTL = 120  # seconds before a pending image is discarded
 
 WEB_SEARCH_TOOL = {
     "type": "function",
@@ -36,6 +39,8 @@ class MatrixLLMBot:
         self.ollama = OllamaClient(config.ollama.url, config.ollama.model)
         self.search = SearXNGClient(config.searxng_url) if config.searxng_url else None
         self._history: dict[tuple[str, str], deque[dict]] = {}
+        # room_id -> (image_bytes, timestamp)
+        self._pending_images: dict[str, tuple[bytes, float]] = {}
         self._started = False
 
     async def run(self) -> None:
@@ -51,7 +56,8 @@ class MatrixLLMBot:
             logger.info("Joined room %s", room_id)
 
         self.client.add_event_callback(self._on_message, RoomMessageText)
-        self.client.add_event_callback(self._on_image, RoomMessageImage)
+        if self.config.ollama.vision_model:
+            self.client.add_event_callback(self._on_image, RoomMessageImage)
 
         await self.client.sync(timeout=0)
         self._started = True
@@ -64,6 +70,20 @@ class MatrixLLMBot:
                 await self.search.aclose()
             await self.ollama.aclose()
             await self.client.close()
+
+    async def _on_image(self, room: MatrixRoom, event: RoomMessageImage) -> None:
+        if not self._started:
+            return
+        if event.sender == self.client.user_id:
+            return
+
+        logger.info("[%s] %s sent an image, storing as pending", room.room_id, event.sender)
+        response = await self.client.download(event.url)
+        if not hasattr(response, "body"):
+            logger.error("Failed to download image: %s", response)
+            return
+
+        self._pending_images[room.room_id] = (response.body, time.monotonic())
 
     async def _on_message(self, room: MatrixRoom, event: RoomMessageText) -> None:
         if not self._started:
@@ -78,18 +98,29 @@ class MatrixLLMBot:
 
         logger.info("[%s] %s: %s", room.room_id, event.sender, prompt)
 
+        # Check for a pending image in this room
+        image_b64: str | None = None
+        pending = self._pending_images.pop(room.room_id, None)
+        if pending is not None:
+            image_bytes, ts = pending
+            if time.monotonic() - ts <= IMAGE_TTL:
+                image_b64 = base64.b64encode(image_bytes).decode()
+                logger.info("[%s] Pairing message with pending image", room.room_id)
+            else:
+                logger.info("[%s] Pending image expired, discarding", room.room_id)
+
         history = self._get_history(room.room_id, event.sender)
-        history.append({"role": "user", "content": prompt})
+        # Store [image] placeholder in history so the model has context
+        if image_b64:
+            history.append({"role": "user", "content": f"[image] {prompt}"})
+        else:
+            history.append({"role": "user", "content": prompt})
 
         try:
-            reply = await self._llm_reply(list(history))
+            reply = await self._llm_reply(list(history), image_b64=image_b64)
         except Exception as exc:
             logger.error("LLM error: %s", exc)
-            await self.client.room_send(
-                room.room_id,
-                message_type="m.room.message",
-                content={"msgtype": "m.text", "body": f"Error: {exc}"},
-            )
+            await self._send(room.room_id, f"Error: {exc}")
             history.pop()
             return
 
@@ -97,50 +128,15 @@ class MatrixLLMBot:
         logger.info("[%s] -> %s", room.room_id, reply[:120])
         await self._send(room.room_id, reply)
 
-    async def _on_image(self, room: MatrixRoom, event: RoomMessageImage) -> None:
-        if not self._started:
-            return
-        if event.sender == self.client.user_id:
-            return
-
-        # Only process image if the bot is mentioned in the caption / body
-        caption = event.body.strip()
-        if not _is_mentioned(caption, self.config.bot_name, self.client.user_id, event.source):
-            return
-
-        prompt = _strip_mention(caption, self.config.bot_name, self.client.user_id) or "Describe this image."
-        logger.info("[%s] %s sent image: %s", room.room_id, event.sender, caption)
-
-        dl = await self.client.download(mxc=event.url)
-        if not isinstance(dl, DownloadResponse):
-            logger.error("Failed to download image: %s", dl)
-            return
-
-        image_b64 = base64.b64encode(dl.body).decode()
-        vision_model = self.config.vision_model or None
-
-        history = self._get_history(room.room_id, event.sender)
-        history.append({"role": "user", "content": prompt})
-
-        try:
-            messages = list(history)
-            if self.config.system_prompt:
-                messages.insert(0, {"role": "system", "content": self.config.system_prompt})
-            reply = await self.ollama.chat_with_image(messages, image_b64, model=vision_model)
-        except Exception as exc:
-            logger.error("Vision error: %s", exc)
-            await self._send(room.room_id, f"Error processing image: {exc}")
-            history.pop()
-            return
-
-        history.append({"role": "assistant", "content": reply})
-        logger.info("[%s] -> %s", room.room_id, reply[:120])
-        await self._send(room.room_id, reply)
-
-    async def _llm_reply(self, history: list[dict]) -> str:
+    async def _llm_reply(self, history: list[dict], image_b64: str | None = None) -> str:
         messages = list(history)
         if self.config.system_prompt:
             messages.insert(0, {"role": "system", "content": self.config.system_prompt})
+
+        if image_b64:
+            return await self.ollama.chat_with_image(
+                messages, image_b64, model=self.config.ollama.vision_model
+            )
 
         if not self.search:
             return await self.ollama.chat(messages)
@@ -152,7 +148,6 @@ class MatrixLLMBot:
         if not tool_calls:
             return msg.get("content", "")
 
-        # Execute all tool calls and collect results
         messages.append(msg)
         for call in tool_calls:
             fn = call.get("function", {})
