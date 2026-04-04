@@ -26,11 +26,11 @@ K8S_TOOLS = [
         "type": "function",
         "function": {
             "name": "k8s_check_health",
-            "description": "Check if a specific service/deployment is healthy and running in the k3s cluster. Use when someone asks if a service is up, running, or healthy.",
+            "description": "Check if a specific service/deployment is healthy and running in the k3s cluster.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "service_name": {"type": "string", "description": "Name of the service to check, e.g. 'jellyfin', 'ollama', 'caddy', 'pihole'"},
+                    "service_name": {"type": "string", "description": "Name of the service to check"},
                 },
                 "required": ["service_name"],
             },
@@ -40,11 +40,11 @@ K8S_TOOLS = [
         "type": "function",
         "function": {
             "name": "k8s_get_pods",
-            "description": "List pods and their status in the k3s cluster. Optionally filter by namespace.",
+            "description": "List pods and their status. Optionally filter by namespace.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "namespace": {"type": "string", "description": "Kubernetes namespace to filter by. Leave empty for all namespaces."},
+                    "namespace": {"type": "string", "description": "Namespace to filter by. Empty = all."},
                 },
                 "required": [],
             },
@@ -54,13 +54,13 @@ K8S_TOOLS = [
         "type": "function",
         "function": {
             "name": "k8s_get_logs",
-            "description": "Get recent logs from a pod in the k3s cluster. Use this to debug issues or check what a service is doing.",
+            "description": "Get recent logs from a pod.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "namespace": {"type": "string", "description": "Kubernetes namespace the pod is in"},
+                    "namespace": {"type": "string", "description": "Namespace the pod is in"},
                     "pod_name": {"type": "string", "description": "Full or partial pod name"},
-                    "tail_lines": {"type": "integer", "description": "Number of log lines to retrieve (default 30)"},
+                    "tail_lines": {"type": "integer", "description": "Number of log lines (default 30)"},
                 },
                 "required": ["namespace", "pod_name"],
             },
@@ -70,7 +70,7 @@ K8S_TOOLS = [
         "type": "function",
         "function": {
             "name": "k8s_list_namespaces",
-            "description": "List all namespaces in the k3s cluster.",
+            "description": "List all namespaces in the cluster.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -78,11 +78,11 @@ K8S_TOOLS = [
         "type": "function",
         "function": {
             "name": "k8s_get_deployments",
-            "description": "List deployments and their replica status. Optionally filter by namespace.",
+            "description": "List deployments and replica status. Optionally filter by namespace.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "namespace": {"type": "string", "description": "Kubernetes namespace to filter by. Leave empty for all."},
+                    "namespace": {"type": "string", "description": "Namespace to filter by. Empty = all."},
                 },
                 "required": [],
             },
@@ -96,7 +96,7 @@ K8S_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "namespace": {"type": "string", "description": "Kubernetes namespace to filter by. Leave empty for all."},
+                    "namespace": {"type": "string", "description": "Namespace to filter by. Empty = all."},
                 },
                 "required": [],
             },
@@ -106,7 +106,7 @@ K8S_TOOLS = [
         "type": "function",
         "function": {
             "name": "k8s_cluster_map",
-            "description": "Get a full map of the k3s cluster showing all namespaces, deployments, their images/versions, and services.",
+            "description": "Get a full map of the cluster: namespaces, deployments with images/versions, services.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -132,7 +132,6 @@ WEB_SEARCH_TOOL = {
 }
 
 
-
 class MatrixLLMBot:
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -143,7 +142,6 @@ class MatrixLLMBot:
         self._cluster_map_cache: str = ""
         self._cluster_map_cache_time: float = 0.0
         self._history: dict[tuple[str, str], deque[dict]] = {}
-        # (room_id, sender) -> (image_bytes, timestamp)  — keyed per sender, not per room
         self._pending_images: dict[tuple[str, str], tuple[bytes, float]] = {}
         self._seen_events: set[str] = set()
         self._started = False
@@ -190,7 +188,6 @@ class MatrixLLMBot:
             logger.error("Failed to download image: %s", response)
             return
 
-        # Key by (room_id, sender) so each user's image is isolated
         self._pending_images[(room.room_id, event.sender)] = (response.body, time.monotonic())
 
     async def _on_message(self, room: MatrixRoom, event: RoomMessageText) -> None:
@@ -199,7 +196,6 @@ class MatrixLLMBot:
         if event.sender == self.client.user_id:
             return
 
-        # Deduplicate — nio can deliver the same event more than once
         if event.event_id in self._seen_events:
             return
         self._seen_events.add(event.event_id)
@@ -211,7 +207,6 @@ class MatrixLLMBot:
         if prompt is None:
             return
 
-        # LLM gate: confirm the message is actually directed at this bot
         try:
             if not await self.ollama.should_respond(self.config.bot_name, body):
                 logger.debug("[%s] Gate rejected message from %s: %s", room.room_id, event.sender, body)
@@ -221,19 +216,16 @@ class MatrixLLMBot:
 
         logger.info("[%s] %s: %s", room.room_id, event.sender, prompt)
 
-        # User commands (available to everyone)
         if prompt.strip().lower() == "reset":
             self._history.pop((room.room_id, event.sender), None)
             await self._send(room.room_id, "Conversation history cleared.")
             return
 
-        # Admin commands
         if event.sender in self.config.admins:
             handled = await self._handle_admin_command(room.room_id, prompt)
             if handled:
                 return
 
-        # Check for a pending image from this specific sender
         image_b64: str | None = None
         pending = self._pending_images.pop((room.room_id, event.sender), None)
         if pending is not None:
@@ -253,7 +245,8 @@ class MatrixLLMBot:
         await self.client.room_typing(room.room_id, typing_state=True, timeout=30_000)
         try:
             reply = await self._llm_reply(
-                list(history), prompt=prompt, image_b64=image_b64, room=room, sender=event.sender
+                list(history), prompt=prompt, image_b64=image_b64,
+                room=room, sender=event.sender,
             )
         except Exception as exc:
             logger.error("LLM error: %s", exc)
@@ -279,22 +272,6 @@ class MatrixLLMBot:
         room_id = room.room_id if room else None
         messages = list(history)
         system = _build_system_prompt(self.config.system_prompt, room=room, sender=sender)
-
-        # Inject cluster map when query is k8s-related
-        if self.k8s and _is_k8s_query(prompt, self.config.k8s_keywords, self.config.k8s_services):
-            cluster_ctx = await self._get_cached_cluster_map()
-            system = (
-                system
-                + "\n\n--- CLUSTER CONTEXT (current state) ---\n"
-                + cluster_ctx
-                + "\n---\n"
-                "Use this context to answer k8s questions accurately. "
-                "Service names map to deployments in specific namespaces. "
-                "The image tag after ':' is the running version. "
-                "DOWN means unhealthy. Do NOT hallucinate — only report what is shown above. "
-                "If something is not in the cluster map, say you don't see it."
-            )
-
         messages.insert(0, {"role": "system", "content": system})
 
         if image_b64:
@@ -302,40 +279,40 @@ class MatrixLLMBot:
                 messages, image_b64, model=self.config.ollama.vision_model
             )
 
+        # K8s: separate context window — resolve first, inject short result
+        if self.k8s and _is_k8s_query(prompt, self.config.k8s_keywords, self.config.k8s_services):
+            if sender in self.config.admins:
+                k8s_context = await self._handle_k8s_query(prompt)
+                if k8s_context:
+                    logger.info("K8s context resolved: %s", k8s_context[:120])
+                    # Inject as a brief system note after the main system prompt
+                    messages.insert(1, {
+                        "role": "system",
+                        "content": f"[Cluster data for your reference: {k8s_context}]",
+                    })
+            else:
+                logger.debug("K8s query from non-admin %s, skipping cluster context", sender)
+
+        # Web search — separate gate
         if not self.search:
             return await self.ollama.chat(messages)
 
-        # Bypass gate if user explicitly requests a search
         if not _explicit_search_request(prompt):
             needs_search = await self.ollama.should_search(prompt)
-            if not needs_search and not self.k8s:
+            if not needs_search:
                 return await self.ollama.chat(messages)
 
-        # Build tool list
-        tools = []
-        if self.search:
-            tools.append(WEB_SEARCH_TOOL)
-        if self.k8s:
-            tools.extend(K8S_TOOLS)
-
-        if not tools:
-            return await self.ollama.chat(messages)
-
-        msg = await self.ollama.chat_with_tools(messages, tools)
+        msg = await self.ollama.chat_with_tools(messages, [WEB_SEARCH_TOOL])
         tool_calls = msg.get("tool_calls") or []
 
         if not tool_calls:
             return msg.get("content", "")
 
-        # Execute tool calls
         tool_blocks: list[str] = []
         for call in tool_calls:
             fn = call.get("function", {})
-            name = fn.get("name", "")
-            args = fn.get("arguments", {})
-
-            if name == "web_search" and self.search:
-                query = args.get("query", "")
+            if fn.get("name") == "web_search":
+                query = fn.get("arguments", {}).get("query", "")
                 logger.info("Web search: %s", query)
                 if room_id:
                     try:
@@ -348,38 +325,10 @@ class MatrixLLMBot:
                     f"{r['title']}\n{r['url']}\n{r['content']}" for r in results
                 ))
 
-            elif name.startswith("k8s_") and self.k8s:
-                if sender not in self.config.admins:
-                    tool_blocks.append("Access denied: only admins can use cluster tools.")
-                    continue
-                logger.info("K8s tool: %s %s", name, args)
-                try:
-                    if name == "k8s_check_health":
-                        result = await self.k8s.check_service_health(args["service_name"])
-                    elif name == "k8s_get_pods":
-                        result = await self.k8s.get_pods(args.get("namespace", ""))
-                    elif name == "k8s_get_logs":
-                        result = await self.k8s.get_logs(
-                            args["namespace"], args["pod_name"], args.get("tail_lines", 30)
-                        )
-                    elif name == "k8s_list_namespaces":
-                        result = await self.k8s.list_namespaces()
-                    elif name == "k8s_get_deployments":
-                        result = await self.k8s.get_deployments(args.get("namespace", ""))
-                    elif name == "k8s_get_services":
-                        result = await self.k8s.get_services(args.get("namespace", ""))
-                    elif name == "k8s_cluster_map":
-                        result = await self.k8s.cluster_map()
-                    else:
-                        result = f"Unknown k8s tool: {name}"
-                    tool_blocks.append(result)
-                except Exception as exc:
-                    tool_blocks.append(f"K8s error: {exc}")
-
         synthesis_instruction = (
-            "You have been given tool results below. "
+            "You have been given web search results below. "
             "Synthesize the information into a clear, concise answer. "
-            "Do not dump raw data — respond naturally and in character."
+            "Do not list raw URLs or copy-paste snippets — respond naturally."
         )
         synthesis_messages = [
             {"role": "system", "content": system + "\n\n" + synthesis_instruction},
@@ -387,6 +336,63 @@ class MatrixLLMBot:
             {"role": "tool", "content": "\n\n---\n\n".join(tool_blocks)},
         ]
         return await self.ollama.chat(synthesis_messages)
+
+    async def _handle_k8s_query(self, prompt: str) -> str:
+        """Separate context window: resolve a k8s query factually, return a short string."""
+        cluster_map = await self._get_cached_cluster_map()
+
+        k8s_system = (
+            "You are a Kubernetes cluster assistant. "
+            "Below is the current cluster state.\n\n"
+            f"{cluster_map}\n\n"
+            "Answer the user's question using ONLY this data. "
+            "Include exact image tags as versions. "
+            "If the answer requires live data (logs, real-time pod status), use the available tools. "
+            "Be brief and factual. No opinions, no explanations."
+        )
+        messages: list[dict] = [
+            {"role": "system", "content": k8s_system},
+            {"role": "user", "content": prompt},
+        ]
+
+        msg = await self.ollama.chat_with_tools(messages, K8S_TOOLS)
+        tool_calls = msg.get("tool_calls") or []
+
+        if not tool_calls:
+            return msg.get("content", "")
+
+        messages.append(msg)
+        for call in tool_calls:
+            fn = call.get("function", {})
+            name = fn.get("name", "")
+            args = fn.get("arguments", {})
+            logger.info("K8s tool: %s %s", name, args)
+            try:
+                result = await self._execute_k8s_tool(name, args)
+            except Exception as exc:
+                result = f"K8s error: {exc}"
+            messages.append({"role": "tool", "content": result})
+
+        return await self.ollama.chat(messages)
+
+    async def _execute_k8s_tool(self, name: str, args: dict) -> str:
+        if name == "k8s_check_health":
+            return await self.k8s.check_service_health(args["service_name"])
+        if name == "k8s_get_pods":
+            return await self.k8s.get_pods(args.get("namespace", ""))
+        if name == "k8s_get_logs":
+            return await self.k8s.get_logs(
+                args["namespace"], args["pod_name"], args.get("tail_lines", 30)
+            )
+        if name == "k8s_list_namespaces":
+            return await self.k8s.list_namespaces()
+        if name == "k8s_get_deployments":
+            return await self.k8s.get_deployments(args.get("namespace", ""))
+        if name == "k8s_get_services":
+            return await self.k8s.get_services(args.get("namespace", ""))
+        if name == "k8s_cluster_map":
+            return await self.k8s.cluster_map()
+        return f"Unknown k8s tool: {name}"
 
     async def _get_cached_cluster_map(self) -> str:
         now = time.monotonic()
@@ -397,14 +403,11 @@ class MatrixLLMBot:
         return self._cluster_map_cache
 
     async def _handle_admin_command(self, room_id: str, prompt: str) -> bool:
-        """Returns True if the prompt was an admin command and has been handled."""
         lower = prompt.strip().lower()
-
         if lower.startswith("avatar "):
             url = prompt.strip()[7:].strip()
             await self._set_avatar(room_id, url)
             return True
-
         return False
 
     async def _set_avatar(self, room_id: str, url: str) -> None:
