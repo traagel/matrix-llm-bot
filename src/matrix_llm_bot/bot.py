@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import logging
+import mimetypes
 import re
 import time
 from collections import deque
 
-from nio import AsyncClient, MatrixRoom, RoomMessageImage, RoomMessageText
+import httpx
+from nio import AsyncClient, MatrixRoom, RoomMessageImage, RoomMessageText, UploadResponse
 
 from .config import Config
 from .ollama import OllamaClient
@@ -98,6 +100,12 @@ class MatrixLLMBot:
 
         logger.info("[%s] %s: %s", room.room_id, event.sender, prompt)
 
+        # Admin commands
+        if event.sender in self.config.admins:
+            handled = await self._handle_admin_command(room.room_id, prompt)
+            if handled:
+                return
+
         # Check for a pending image in this room
         image_b64: str | None = None
         pending = self._pending_images.pop(room.room_id, None)
@@ -161,6 +169,45 @@ class MatrixLLMBot:
                 messages.append({"role": "tool", "content": tool_result})
 
         return await self.ollama.chat(messages)
+
+    async def _handle_admin_command(self, room_id: str, prompt: str) -> bool:
+        """Returns True if the prompt was an admin command and has been handled."""
+        lower = prompt.strip().lower()
+
+        if lower.startswith("avatar "):
+            url = prompt.strip()[7:].strip()
+            await self._set_avatar(room_id, url)
+            return True
+
+        return False
+
+    async def _set_avatar(self, room_id: str, url: str) -> None:
+        logger.info("Setting avatar from URL: %s", url)
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                image_data = response.content
+                content_type = response.headers.get("content-type", "").split(";")[0].strip()
+
+            if not content_type.startswith("image/"):
+                # Guess from URL if the server didn't tell us
+                guessed, _ = mimetypes.guess_type(url)
+                content_type = guessed if guessed and guessed.startswith("image/") else "image/jpeg"
+
+            upload_resp, _ = await self.client.upload(
+                image_data,
+                content_type=content_type,
+            )
+            if not isinstance(upload_resp, UploadResponse):
+                raise RuntimeError(f"Upload failed: {upload_resp}")
+
+            await self.client.set_avatar(upload_resp.content_uri)
+            logger.info("Avatar set to %s", upload_resp.content_uri)
+            await self._send(room_id, "Avatar updated.")
+        except Exception as exc:
+            logger.error("Failed to set avatar: %s", exc)
+            await self._send(room_id, f"Failed to set avatar: {exc}")
 
     async def _send(self, room_id: str, text: str) -> None:
         await self.client.room_send(
