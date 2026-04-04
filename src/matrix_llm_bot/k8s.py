@@ -5,14 +5,20 @@ from kubernetes_asyncio import client, config
 
 class K8sClient:
     def __init__(self) -> None:
-        config.load_incluster_config()
-        self._api_client = client.ApiClient()
+        self._api_client: client.ApiClient | None = None
+
+    async def _ensure_client(self) -> None:
+        if self._api_client is None:
+            config.load_incluster_config()
+            self._api_client = client.ApiClient()
 
     async def aclose(self) -> None:
-        await self._api_client.close()
+        if self._api_client is not None:
+            await self._api_client.close()
 
     async def cluster_map(self) -> str:
         """Build a full map of the cluster: namespaces, deployments with images, services."""
+        await self._ensure_client()
         v1 = client.CoreV1Api(api_client=self._api_client)
         apps = client.AppsV1Api(api_client=self._api_client)
 
@@ -46,11 +52,13 @@ class K8sClient:
         return "\n".join(lines)
 
     async def list_namespaces(self) -> str:
+        await self._ensure_client()
         v1 = client.CoreV1Api(api_client=self._api_client)
         ns_list = await v1.list_namespace()
         return "\n".join(f"- {ns.metadata.name}" for ns in ns_list.items)
 
     async def get_pods(self, namespace: str = "") -> str:
+        await self._ensure_client()
         v1 = client.CoreV1Api(api_client=self._api_client)
         pods = await (
             v1.list_namespaced_pod(namespace) if namespace
@@ -68,6 +76,7 @@ class K8sClient:
         return "\n".join(lines) if lines else "No pods found"
 
     async def get_deployments(self, namespace: str = "") -> str:
+        await self._ensure_client()
         apps = client.AppsV1Api(api_client=self._api_client)
         deps = await (
             apps.list_namespaced_deployment(namespace) if namespace
@@ -83,6 +92,7 @@ class K8sClient:
         return "\n".join(lines) if lines else "No deployments found"
 
     async def get_logs(self, namespace: str, pod_name: str, tail_lines: int = 30) -> str:
+        await self._ensure_client()
         v1 = client.CoreV1Api(api_client=self._api_client)
         pods = await v1.list_namespaced_pod(namespace)
         match = next(
@@ -95,6 +105,7 @@ class K8sClient:
         return logs if logs else "No logs available"
 
     async def get_services(self, namespace: str = "") -> str:
+        await self._ensure_client()
         v1 = client.CoreV1Api(api_client=self._api_client)
         svcs = await (
             v1.list_namespaced_service(namespace) if namespace
@@ -110,6 +121,7 @@ class K8sClient:
         return "\n".join(lines) if lines else "No services found"
 
     async def check_service_health(self, service_name: str) -> str:
+        await self._ensure_client()
         apps = client.AppsV1Api(api_client=self._api_client)
         deps = await apps.list_deployment_for_all_namespaces()
         results = []
