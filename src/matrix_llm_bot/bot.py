@@ -356,14 +356,38 @@ class MatrixLLMBot:
             mappings = ", ".join(f'"{k}" = {v}' for k, v in self.config.k8s_aliases.items())
             alias_context = f"\nService aliases: {mappings}. Translate these names when looking up services.\n"
 
+        # Pre-fetch live health for any mentioned services — don't rely on the model to call tools
+        live_checks: list[str] = []
+        checked: set[str] = set()
+        for service in self.config.k8s_services:
+            if service.lower() in translated.lower() and service not in checked:
+                checked.add(service)
+                try:
+                    live_checks.append(await self.k8s.check_service_health(service))
+                except Exception as exc:
+                    live_checks.append(f"Could not check {service}: {exc}")
+        # Also check resolved alias targets
+        for alias, real_name in self.config.k8s_aliases.items():
+            if alias.lower() in prompt.lower() and real_name not in checked:
+                checked.add(real_name)
+                try:
+                    live_checks.append(await self.k8s.check_service_health(real_name))
+                except Exception as exc:
+                    live_checks.append(f"Could not check {real_name}: {exc}")
+
+        live_section = (
+            "\nLive service checks:\n" + "\n\n".join(live_checks) + "\n"
+            if live_checks else ""
+        )
+
         k8s_system = (
             "You are a Kubernetes cluster assistant. "
             "Below is the current cluster state.\n\n"
             f"{cluster_map}\n"
+            f"{live_section}"
             f"{alias_context}\n"
             "Answer the user's question using ONLY this data. "
             "Include exact image tags as versions. "
-            "If the answer requires live data (logs, real-time pod status), use the available tools. "
             "Reply in plain prose — one or two sentences. "
             "No JSON, no markdown, no bullet points, no structured data."
         )
@@ -372,26 +396,28 @@ class MatrixLLMBot:
             {"role": "user", "content": translated},
         ]
 
-        msg = await self.ollama.chat_with_tools(messages, K8S_TOOLS)
-        tool_calls = msg.get("tool_calls") or []
-
-        if not tool_calls:
+        # Only use tool calls for log requests (requires model to identify pod name)
+        is_log_request = any(kw in translated.lower() for kw in ("log", "logs"))
+        if is_log_request:
+            if sender not in self.config.admins:
+                return "Access denied: only admins can view logs."
+            log_tools = [t for t in K8S_TOOLS if t["function"]["name"] == "k8s_get_logs"]
+            msg = await self.ollama.chat_with_tools(messages, log_tools)
+            tool_calls = msg.get("tool_calls") or []
+            if tool_calls:
+                messages.append(msg)
+                for call in tool_calls:
+                    fn = call.get("function", {})
+                    name = fn.get("name", "")
+                    args = fn.get("arguments", {})
+                    logger.info("K8s tool: %s %s", name, args)
+                    try:
+                        result = await self._execute_k8s_tool(name, args)
+                    except Exception as exc:
+                        result = f"K8s error: {exc}"
+                    messages.append({"role": "tool", "content": result})
+                return await self.ollama.chat(messages)
             return msg.get("content", "")
-
-        messages.append(msg)
-        for call in tool_calls:
-            fn = call.get("function", {})
-            name = fn.get("name", "")
-            args = fn.get("arguments", {})
-            logger.info("K8s tool: %s %s", name, args)
-            if name == "k8s_get_logs" and sender not in self.config.admins:
-                result = "Access denied: only admins can view logs."
-            else:
-                try:
-                    result = await self._execute_k8s_tool(name, args)
-                except Exception as exc:
-                    result = f"K8s error: {exc}"
-            messages.append({"role": "tool", "content": result})
 
         return await self.ollama.chat(messages)
 
