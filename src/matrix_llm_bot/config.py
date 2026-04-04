@@ -41,6 +41,7 @@ class Config:
     k8s_enabled: bool = False
     k8s_keywords: list[str] = field(default_factory=lambda: list(DEFAULT_K8S_KEYWORDS))
     k8s_services: list[str] = field(default_factory=list)
+    k8s_aliases: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":
@@ -80,4 +81,5 @@ class Config:
             k8s_enabled=bool(data.get("k8s_enabled", False)),
             k8s_keywords=data.get("k8s_keywords", list(DEFAULT_K8S_KEYWORDS)),
             k8s_services=data.get("k8s_services", []),
+            k8s_aliases=data.get("k8s_aliases", {}),
         )

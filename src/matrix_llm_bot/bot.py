@@ -280,7 +280,7 @@ class MatrixLLMBot:
             )
 
         # K8s: separate context window — resolve first, inject short result
-        if self.k8s and _is_k8s_query(prompt, self.config.k8s_keywords, self.config.k8s_services):
+        if self.k8s and _is_k8s_query(prompt, self.config.k8s_keywords, self.config.k8s_services, self.config.k8s_aliases):
             if sender in self.config.admins:
                 k8s_context = await self._handle_k8s_query(prompt)
                 if k8s_context:
@@ -341,10 +341,16 @@ class MatrixLLMBot:
         """Separate context window: resolve a k8s query factually, return a short string."""
         cluster_map = await self._get_cached_cluster_map()
 
+        alias_context = ""
+        if self.config.k8s_aliases:
+            mappings = ", ".join(f'"{k}" = {v}' for k, v in self.config.k8s_aliases.items())
+            alias_context = f"\nService aliases: {mappings}. Translate these names when looking up services.\n"
+
         k8s_system = (
             "You are a Kubernetes cluster assistant. "
             "Below is the current cluster state.\n\n"
-            f"{cluster_map}\n\n"
+            f"{cluster_map}\n"
+            f"{alias_context}\n"
             "Answer the user's question using ONLY this data. "
             "Include exact image tags as versions. "
             "If the answer requires live data (logs, real-time pod status), use the available tools. "
@@ -452,9 +458,13 @@ class MatrixLLMBot:
         return self._history[key]
 
 
-def _is_k8s_query(prompt: str, keywords: list[str], services: list[str]) -> bool:
+def _is_k8s_query(prompt: str, keywords: list[str], services: list[str], aliases: dict[str, str] | None = None) -> bool:
     words = set(re.sub(r"[^\w\s-]", " ", prompt.lower()).split())
-    all_terms = set(k.lower() for k in keywords) | set(s.lower() for s in services)
+    all_terms = (
+        set(k.lower() for k in keywords)
+        | set(s.lower() for s in services)
+        | set(a.lower() for a in (aliases or {}))
+    )
     return bool(words & all_terms)
 
 
