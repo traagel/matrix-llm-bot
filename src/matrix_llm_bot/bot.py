@@ -341,6 +341,11 @@ class MatrixLLMBot:
         """Separate context window: resolve a k8s query factually, return a short string."""
         cluster_map = await self._get_cached_cluster_map()
 
+        # Translate aliases before the LLM sees the message
+        translated = prompt
+        for alias, real_name in self.config.k8s_aliases.items():
+            translated = re.sub(re.escape(alias), real_name, translated, flags=re.IGNORECASE)
+
         alias_context = ""
         if self.config.k8s_aliases:
             mappings = ", ".join(f'"{k}" = {v}' for k, v in self.config.k8s_aliases.items())
@@ -358,7 +363,7 @@ class MatrixLLMBot:
         )
         messages: list[dict] = [
             {"role": "system", "content": k8s_system},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": translated},
         ]
 
         msg = await self.ollama.chat_with_tools(messages, K8S_TOOLS)
