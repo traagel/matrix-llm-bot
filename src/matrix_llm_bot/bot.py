@@ -7,6 +7,7 @@ import mimetypes
 import re
 import time
 from collections import deque
+from datetime import datetime, timezone
 
 import httpx
 from nio import AsyncClient, MatrixRoom, RoomMessageImage, RoomMessageText, UploadResponse
@@ -134,7 +135,7 @@ class MatrixLLMBot:
         await self.client.room_typing(room.room_id, typing=True, timeout=30_000)
         try:
             reply = await self._llm_reply(
-                list(history), prompt=prompt, image_b64=image_b64, room_id=room.room_id
+                list(history), prompt=prompt, image_b64=image_b64, room=room, sender=event.sender
             )
         except Exception as exc:
             logger.error("LLM error: %s", exc)
@@ -154,11 +155,13 @@ class MatrixLLMBot:
         history: list[dict],
         prompt: str,
         image_b64: str | None = None,
-        room_id: str | None = None,
+        room: MatrixRoom | None = None,
+        sender: str | None = None,
     ) -> str:
+        room_id = room.room_id if room else None
         messages = list(history)
-        if self.config.system_prompt:
-            messages.insert(0, {"role": "system", "content": self.config.system_prompt})
+        system = _build_system_prompt(self.config.system_prompt, room=room, sender=sender)
+        messages.insert(0, {"role": "system", "content": system})
 
         if image_b64:
             return await self.ollama.chat_with_image(
@@ -184,7 +187,7 @@ class MatrixLLMBot:
                 logger.info("Web search: %s", query)
                 if room_id:
                     try:
-                        ack = await self.ollama.acknowledgment(self.config.system_prompt, query)
+                        ack = await self.ollama.acknowledgment(system, query)
                         await self._send(room_id, ack)
                     except Exception:
                         pass
@@ -200,12 +203,8 @@ class MatrixLLMBot:
             "Synthesize the information into a clear, concise answer. "
             "Do not list raw URLs or copy-paste snippets — respond naturally."
         )
-        system_content = (
-            (self.config.system_prompt + "\n\n" if self.config.system_prompt else "")
-            + search_instruction
-        )
         synthesis_messages = [
-            {"role": "system", "content": system_content},
+            {"role": "system", "content": system + "\n\n" + search_instruction},
             {"role": "user", "content": prompt},
             {"role": "tool", "content": "\n\n---\n\n".join(search_blocks)},
         ]
@@ -262,6 +261,30 @@ class MatrixLLMBot:
         if key not in self._history:
             self._history[key] = deque(maxlen=self.config.history_size)
         return self._history[key]
+
+
+def _build_system_prompt(
+    base: str,
+    room: MatrixRoom | None = None,
+    sender: str | None = None,
+) -> str:
+    now = datetime.now(timezone.utc)
+    lines = [f"Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M UTC')}"]
+
+    if room:
+        room_name = room.display_name or room.room_id
+        lines.append(f"Room: {room_name}")
+
+    if sender and room and sender in room.users:
+        display_name = room.users[sender].display_name or sender
+        lines.append(f"You are speaking with: {display_name} ({sender})")
+    elif sender:
+        lines.append(f"You are speaking with: {sender}")
+
+    context = "\n".join(lines)
+    if base:
+        return f"{base}\n\n[Context]\n{context}"
+    return f"[Context]\n{context}"
 
 
 def _is_mentioned(body: str, bot_name: str, user_id: str, source: dict) -> bool:
