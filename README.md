@@ -56,7 +56,7 @@ cp config.example.json config.json
 | Field | Description |
 |---|---|
 | `matrix.server` | URL of your Matrix homeserver |
-| `matrix.username` | Bot's Matrix localpart (without `@` and homeserver) |
+| `matrix.username` | Bot's full Matrix user ID (e.g. `@llm-bot:example.com`) |
 | `matrix.password` | Bot's Matrix password |
 | `ollama.url` | Base URL of your Ollama instance |
 | `ollama.model` | Model name to use (e.g. `llama3.1:8b`, `mistral`) |

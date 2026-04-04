@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class MatrixLLMBot:
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.client = AsyncClient(config.matrix.server, f"@{config.matrix.username}:{_homeserver(config.matrix.server)}")
+        self.client = AsyncClient(config.matrix.server, config.matrix.username)
         self.ollama = OllamaClient(config.ollama.url, config.ollama.model)
         # history keyed by (room_id, sender) -> deque of {"role": ..., "content": ...}
         self._history: dict[tuple[str, str], deque[dict]] = {}
@@ -98,7 +98,3 @@ def _extract_prompt(body: str, bot_name: str) -> str | None:
     return None
 
 
-def _homeserver(server_url: str) -> str:
-    """Extract homeserver name from URL for user ID construction."""
-    from urllib.parse import urlparse
-    return urlparse(server_url).hostname or "localhost"

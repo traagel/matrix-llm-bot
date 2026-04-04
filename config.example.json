@@ -1,7 +1,7 @@
 {
   "matrix": {
     "server": "https://matrix.example.com",
-    "username": "llm-bot",
+    "username": "@llm-bot:example.com",
     "password": "secretpassword"
   },
   "ollama": {
