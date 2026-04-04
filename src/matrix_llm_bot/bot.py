@@ -239,9 +239,8 @@ def _extract_prompt(body: str, bot_name: str, user_id: str, source: dict) -> str
 
 
 def _strip_mention(body: str, bot_name: str, user_id: str) -> str:
-    pattern = re.compile(
-        r"@?" + re.escape(user_id) + r"|@?" + re.escape(bot_name),
-        re.IGNORECASE,
-    )
-    cleaned = pattern.sub("", body).strip(" ,:\t\n")
-    return cleaned or body.strip()
+    mention = r"@?(?:" + re.escape(user_id) + r"|" + re.escape(bot_name) + r")"
+    # Only strip at the start or end of the message, never inside (e.g. URLs)
+    cleaned = re.sub(r"(?i)^\s*" + mention + r"[,:\s]*", "", body)
+    cleaned = re.sub(r"(?i)[,:\s]*" + mention + r"\s*$", "", cleaned)
+    return cleaned.strip() or body.strip()
