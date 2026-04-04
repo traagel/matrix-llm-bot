@@ -28,6 +28,48 @@ class OllamaClient:
         response.raise_for_status()
         return response.json()["message"]["content"]
 
+    async def should_respond(self, bot_name: str, message: str) -> bool:
+        """Ask the model if this message is actually directed at bot_name."""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"You are a routing assistant. Your only job is to decide if a chat message "
+                    f"is directly addressed to or intended for '{bot_name}'. "
+                    f"Reply with a single word: YES or NO. Nothing else."
+                ),
+            },
+            {"role": "user", "content": message},
+        ]
+        response = await self._client.post(
+            f"{self.url}/api/chat",
+            json={"model": self.model, "messages": messages, "stream": False},
+        )
+        response.raise_for_status()
+        answer = response.json()["message"]["content"].strip().upper()
+        return answer.startswith("Y")
+
+    async def acknowledgment(self, system_prompt: str, query: str) -> str:
+        """Generate a brief in-character acknowledgment before a web search."""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    system_prompt + "\n\n" if system_prompt else ""
+                ) + (
+                    "Reply with ONLY a single short sentence acknowledging that you are about to "
+                    "look something up. Stay in character. No additional commentary."
+                ),
+            },
+            {"role": "user", "content": f'I need you to search for: "{query}"'},
+        ]
+        response = await self._client.post(
+            f"{self.url}/api/chat",
+            json={"model": self.model, "messages": messages, "stream": False},
+        )
+        response.raise_for_status()
+        return response.json()["message"]["content"]
+
     async def chat_with_tools(self, messages: list[dict], tools: list[dict]) -> dict:
         """Returns the raw assistant message dict (may contain tool_calls)."""
         response = await self._client.post(

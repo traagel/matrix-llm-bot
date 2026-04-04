@@ -101,6 +101,14 @@ class MatrixLLMBot:
         if prompt is None:
             return
 
+        # LLM gate: confirm the message is actually directed at this bot
+        try:
+            if not await self.ollama.should_respond(self.config.bot_name, body):
+                logger.debug("[%s] Gate rejected message from %s: %s", room.room_id, event.sender, body)
+                return
+        except Exception as exc:
+            logger.warning("Gate call failed, proceeding anyway: %s", exc)
+
         logger.info("[%s] %s: %s", room.room_id, event.sender, prompt)
 
         # User commands (available to everyone)
