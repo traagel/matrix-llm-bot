@@ -42,8 +42,8 @@ class MatrixLLMBot:
         self.ollama = OllamaClient(config.ollama.url, config.ollama.model)
         self.search = SearXNGClient(config.searxng_url) if config.searxng_url else None
         self._history: dict[tuple[str, str], deque[dict]] = {}
-        # room_id -> (image_bytes, timestamp)
-        self._pending_images: dict[str, tuple[bytes, float]] = {}
+        # (room_id, sender) -> (image_bytes, timestamp)  — keyed per sender, not per room
+        self._pending_images: dict[tuple[str, str], tuple[bytes, float]] = {}
         self._started = False
 
     async def run(self) -> None:
@@ -86,7 +86,8 @@ class MatrixLLMBot:
             logger.error("Failed to download image: %s", response)
             return
 
-        self._pending_images[room.room_id] = (response.body, time.monotonic())
+        # Key by (room_id, sender) so each user's image is isolated
+        self._pending_images[(room.room_id, event.sender)] = (response.body, time.monotonic())
 
     async def _on_message(self, room: MatrixRoom, event: RoomMessageText) -> None:
         if not self._started:
@@ -101,43 +102,60 @@ class MatrixLLMBot:
 
         logger.info("[%s] %s: %s", room.room_id, event.sender, prompt)
 
+        # User commands (available to everyone)
+        if prompt.strip().lower() == "reset":
+            self._history.pop((room.room_id, event.sender), None)
+            await self._send(room.room_id, "Conversation history cleared.")
+            return
+
         # Admin commands
         if event.sender in self.config.admins:
             handled = await self._handle_admin_command(room.room_id, prompt)
             if handled:
                 return
 
-        # Check for a pending image in this room
+        # Check for a pending image from this specific sender
         image_b64: str | None = None
-        pending = self._pending_images.pop(room.room_id, None)
+        pending = self._pending_images.pop((room.room_id, event.sender), None)
         if pending is not None:
             image_bytes, ts = pending
             if time.monotonic() - ts <= IMAGE_TTL:
                 image_b64 = base64.b64encode(image_bytes).decode()
-                logger.info("[%s] Pairing message with pending image", room.room_id)
+                logger.info("[%s] Pairing message with pending image from %s", room.room_id, event.sender)
             else:
-                logger.info("[%s] Pending image expired, discarding", room.room_id)
+                logger.info("[%s] Pending image from %s expired, discarding", room.room_id, event.sender)
 
         history = self._get_history(room.room_id, event.sender)
-        # Store [image] placeholder in history so the model has context
         if image_b64:
             history.append({"role": "user", "content": f"[image] {prompt}"})
         else:
             history.append({"role": "user", "content": prompt})
 
+        await self.client.room_typing(room.room_id, typing=True, timeout=30_000)
         try:
-            reply = await self._llm_reply(list(history), image_b64=image_b64)
+            reply = await self._llm_reply(
+                list(history), prompt=prompt, image_b64=image_b64, room_id=room.room_id
+            )
         except Exception as exc:
             logger.error("LLM error: %s", exc)
+            await self.client.room_typing(room.room_id, typing=False)
             await self._send(room.room_id, f"Error: {exc}")
             history.pop()
             return
+        finally:
+            await self.client.room_typing(room.room_id, typing=False)
 
         history.append({"role": "assistant", "content": reply})
         logger.info("[%s] -> %s", room.room_id, reply[:120])
         await self._send(room.room_id, reply)
 
-    async def _llm_reply(self, history: list[dict], image_b64: str | None = None) -> str:
+    async def _llm_reply(
+        self,
+        history: list[dict],
+        prompt: str,
+        image_b64: str | None = None,
+        room_id: str | None = None,
+    ) -> str:
         messages = list(history)
         if self.config.system_prompt:
             messages.insert(0, {"role": "system", "content": self.config.system_prompt})
@@ -157,33 +175,41 @@ class MatrixLLMBot:
         if not tool_calls:
             return msg.get("content", "")
 
-        messages.append(msg)
+        # Execute searches
+        search_blocks: list[str] = []
         for call in tool_calls:
             fn = call.get("function", {})
             if fn.get("name") == "web_search":
                 query = fn.get("arguments", {}).get("query", "")
                 logger.info("Web search: %s", query)
+                if room_id:
+                    try:
+                        ack = await self.ollama.acknowledgment(self.config.system_prompt, query)
+                        await self._send(room_id, ack)
+                    except Exception:
+                        pass
                 results = await self.search.search(query)
-                tool_result = "\n\n".join(
+                search_blocks.append("\n\n".join(
                     f"{r['title']}\n{r['url']}\n{r['content']}" for r in results
-                )
-                messages.append({"role": "tool", "content": tool_result})
+                ))
 
-        # Inject search synthesis instruction into the system prompt for the final call
+        # Synthesis call: only current question + search results, no conversation history
+        # This prevents old topic bleed from confusing the synthesis
         search_instruction = (
-            "You have been given web search results above. "
+            "You have been given web search results below. "
             "Synthesize the information into a clear, concise answer. "
             "Do not list raw URLs or copy-paste snippets — respond naturally."
         )
-        if messages and messages[0]["role"] == "system":
-            messages[0] = {
-                "role": "system",
-                "content": messages[0]["content"] + "\n\n" + search_instruction,
-            }
-        else:
-            messages.insert(0, {"role": "system", "content": search_instruction})
-
-        return await self.ollama.chat(messages)
+        system_content = (
+            (self.config.system_prompt + "\n\n" if self.config.system_prompt else "")
+            + search_instruction
+        )
+        synthesis_messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": prompt},
+            {"role": "tool", "content": "\n\n---\n\n".join(search_blocks)},
+        ]
+        return await self.ollama.chat(synthesis_messages)
 
     async def _handle_admin_command(self, room_id: str, prompt: str) -> bool:
         """Returns True if the prompt was an admin command and has been handled."""
@@ -206,7 +232,6 @@ class MatrixLLMBot:
                 content_type = response.headers.get("content-type", "").split(";")[0].strip()
 
             if not content_type.startswith("image/"):
-                # Guess from URL if the server didn't tell us
                 guessed, _ = mimetypes.guess_type(url)
                 content_type = guessed if guessed and guessed.startswith("image/") else "image/jpeg"
 
@@ -256,7 +281,6 @@ def _extract_prompt(body: str, bot_name: str, user_id: str, source: dict) -> str
 
 def _strip_mention(body: str, bot_name: str, user_id: str) -> str:
     mention = r"@?(?:" + re.escape(user_id) + r"|" + re.escape(bot_name) + r")"
-    # Only strip at the start or end of the message, never inside (e.g. URLs)
     cleaned = re.sub(r"(?i)^\s*" + mention + r"[,:\s]*", "", body)
     cleaned = re.sub(r"(?i)[,:\s]*" + mention + r"\s*$", "", cleaned)
     return cleaned.strip() or body.strip()
