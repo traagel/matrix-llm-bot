@@ -1,7 +1,7 @@
 {
   "matrix": {
-    "server": "https://matrix.example.com",
-    "username": "@llm-bot:example.com",
+    "server": "http://localhost:8008",
+    "username": "@bot:example.com",
     "password": "secretpassword"
   },
   "ollama": {
@@ -11,5 +11,6 @@
   "rooms": ["!roomid:example.com"],
   "admins": ["@admin:example.com"],
   "history_size": 20,
-  "bot_name": "llm-bot"
+  "bot_name": "llm-bot",
+  "system_prompt": ""
 }

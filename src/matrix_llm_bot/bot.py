@@ -25,6 +25,9 @@ class MatrixLLMBot:
         resp = await self.client.login(self.config.matrix.password)
         logger.info("Logged in: %s", resp)
 
+        await self.client.set_displayname(self.config.bot_name)
+        logger.info("Display name set to %s", self.config.bot_name)
+
         for room_id in self.config.rooms:
             await self.client.join(room_id)
             logger.info("Joined room %s", room_id)
@@ -61,7 +64,10 @@ class MatrixLLMBot:
         history.append({"role": "user", "content": prompt})
 
         try:
-            reply = await self.ollama.chat(list(history))
+            messages = list(history)
+            if self.config.system_prompt:
+                messages.insert(0, {"role": "system", "content": self.config.system_prompt})
+            reply = await self.ollama.chat(messages)
         except Exception as exc:
             logger.error("Ollama error: %s", exc)
             await self.client.room_send(

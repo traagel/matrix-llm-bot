@@ -26,6 +26,7 @@ class Config:
     admins: list[str]
     history_size: int
     bot_name: str
+    system_prompt: str = ""
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":
@@ -58,4 +59,5 @@ class Config:
             admins=data.get("admins", []),
             history_size=int(data.get("history_size", 20)),
             bot_name=data.get("bot_name", "llm-bot"),
+            system_prompt=data.get("system_prompt", ""),
         )
