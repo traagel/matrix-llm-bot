@@ -57,8 +57,18 @@ class OllamaClient:
         )
         response.raise_for_status()
         answer = response.json()["message"]["content"].strip().upper()
-        logger.debug("Search gate: %r -> %s", message[:80], answer)
-        return answer.startswith("Y")
+        yes_pos = answer.find("YES")
+        no_pos = answer.find("NO")
+        if yes_pos == -1 and no_pos == -1:
+            result = False  # ambiguous — default to not searching
+        elif yes_pos == -1:
+            result = False
+        elif no_pos == -1:
+            result = True
+        else:
+            result = yes_pos < no_pos
+        logger.debug("Search gate: %r -> %s (raw: %r)", message[:80], "YES" if result else "NO", answer[:40])
+        return result
 
     async def should_respond(self, bot_name: str, message: str, peer_bots: list[str] | None = None) -> bool:
         """Ask the model if this message is directed at bot_name and not at a peer bot."""
@@ -88,8 +98,18 @@ class OllamaClient:
         )
         response.raise_for_status()
         answer = response.json()["message"]["content"].strip().upper()
-        logger.debug("Respond gate: %r -> %s", message[:80], answer)
-        return answer.startswith("Y")
+        yes_pos = answer.find("YES")
+        no_pos = answer.find("NO")
+        if yes_pos == -1 and no_pos == -1:
+            result = True  # ambiguous — default to responding
+        elif yes_pos == -1:
+            result = False
+        elif no_pos == -1:
+            result = True
+        else:
+            result = yes_pos < no_pos
+        logger.debug("Respond gate: %r -> %s (raw: %r)", message[:80], "YES" if result else "NO", answer[:40])
+        return result
 
     async def acknowledgment(self, system_prompt: str, query: str) -> str:
         """Generate a brief in-character acknowledgment before a web search."""
