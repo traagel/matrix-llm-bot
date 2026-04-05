@@ -81,6 +81,7 @@ cp config.example.json config.json
 | `admins` | No | Matrix user IDs with admin privileges (avatar command, k8s logs) |
 | `history_size` | No | Messages to keep per user per room (default: 20) |
 | `bot_name` | No | Display name set on login, also used as mention trigger |
+| `peer_bots` | No | Names of other bots in the same room (e.g. `["stephen"]`). The gate uses this to avoid responding to messages clearly directed at a peer. |
 | `system_prompt` | No | Persona/instructions prepended to every LLM call |
 | `searxng_url` | No | SearXNG base URL. Omit to disable web search. |
 | `k8s_enabled` | No | Enable Kubernetes monitoring tools (default: false) |

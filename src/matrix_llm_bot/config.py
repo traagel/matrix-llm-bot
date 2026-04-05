@@ -37,6 +37,7 @@ class Config:
     history_size: int
     bot_name: str
     system_prompt: str = ""
+    peer_bots: list[str] = field(default_factory=list)
     searxng_url: str = ""
     k8s_enabled: bool = False
     k8s_keywords: list[str] = field(default_factory=lambda: list(DEFAULT_K8S_KEYWORDS))
@@ -77,6 +78,7 @@ class Config:
             history_size=int(data.get("history_size", 20)),
             bot_name=data.get("bot_name", "llm-bot"),
             system_prompt=data.get("system_prompt", ""),
+            peer_bots=data.get("peer_bots", []),
             searxng_url=data.get("searxng_url", ""),
             k8s_enabled=bool(data.get("k8s_enabled", False)),
             k8s_keywords=data.get("k8s_keywords", list(DEFAULT_K8S_KEYWORDS)),

@@ -60,18 +60,23 @@ class OllamaClient:
         logger.debug("Search gate: %r -> %s", message[:80], answer)
         return answer.startswith("Y")
 
-    async def should_respond(self, bot_name: str, message: str) -> bool:
-        """Ask the model if this message is actually directed at bot_name."""
+    async def should_respond(self, bot_name: str, message: str, peer_bots: list[str] | None = None) -> bool:
+        """Ask the model if this message is directed at bot_name and not at a peer bot."""
+        others = peer_bots or []
+        others_line = (
+            f" Other bots in this room: {', '.join(others)}."
+            f" Answer NO if the message is clearly directed at one of them instead."
+            if others else ""
+        )
         messages = [
             {
                 "role": "system",
                 "content": (
                     f"You are a routing assistant deciding if a chat message is directly addressed "
-                    f"to '{bot_name}' (match the name case-insensitively). "
+                    f"to '{bot_name}' (match case-insensitively).{others_line} "
                     f"Answer YES if '{bot_name}' is the one being spoken to or asked to do something. "
-                    f"Answer NO if the message is addressed to someone else, if '{bot_name}' is only "
-                    f"mentioned in passing (e.g. 'tell {bot_name} to leave'), or if another name "
-                    f"appears at the start of the message as the primary addressee. "
+                    f"Answer NO if the message is addressed to someone else, or if '{bot_name}' is only "
+                    f"mentioned in passing. "
                     f"Reply with a single word: YES or NO. Nothing else."
                 ),
             },

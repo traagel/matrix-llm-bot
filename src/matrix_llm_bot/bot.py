@@ -210,7 +210,7 @@ class MatrixLLMBot:
         logger.debug("[%s] Mention detected from %s: %r", room.room_id, event.sender, body[:120])
 
         try:
-            if not await self.ollama.should_respond(self.config.bot_name, body):
+            if not await self.ollama.should_respond(self.config.bot_name, body, self.config.peer_bots):
                 logger.info("[%s] Gate rejected message from %s: %r", room.room_id, event.sender, body[:120])
                 return
             logger.debug("[%s] Gate accepted message from %s", room.room_id, event.sender)
