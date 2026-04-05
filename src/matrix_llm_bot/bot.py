@@ -207,11 +207,13 @@ class MatrixLLMBot:
         prompt = _extract_prompt(body, self.config.bot_name, self.client.user_id, event.source)
         if prompt is None:
             return
+        logger.debug("[%s] Mention detected from %s: %r", room.room_id, event.sender, body[:120])
 
         try:
             if not await self.ollama.should_respond(self.config.bot_name, body):
-                logger.debug("[%s] Gate rejected message from %s: %s", room.room_id, event.sender, body)
+                logger.info("[%s] Gate rejected message from %s: %r", room.room_id, event.sender, body[:120])
                 return
+            logger.debug("[%s] Gate accepted message from %s", room.room_id, event.sender)
         except Exception as exc:
             logger.warning("Gate call failed, proceeding anyway: %s", exc)
 
@@ -276,13 +278,16 @@ class MatrixLLMBot:
         messages.insert(0, {"role": "system", "content": system})
 
         if image_b64:
+            logger.info("[%s] Vision path: model=%s", room_id, self.config.ollama.vision_model)
             return await self.ollama.chat_with_image(
                 messages, image_b64, model=self.config.ollama.vision_model
             )
 
         # K8s: separate context window — resolve first, inject short result
         k8s_resolved = False
-        if self.k8s and _is_k8s_query(prompt, self.config.k8s_keywords, self.config.k8s_services, self.config.k8s_aliases):
+        is_k8s = self.k8s and _is_k8s_query(prompt, self.config.k8s_keywords, self.config.k8s_services, self.config.k8s_aliases)
+        logger.debug("[%s] K8s query detection: %s", room_id, bool(is_k8s))
+        if is_k8s:
             if room_id:
                 try:
                     ack = await self.ollama.acknowledgment(system, "the cluster status")
@@ -291,26 +296,37 @@ class MatrixLLMBot:
                     pass
             k8s_context = await self._handle_k8s_query(prompt, sender=sender)
             if k8s_context:
-                logger.info("K8s context resolved: %s", k8s_context[:120])
+                logger.info("[%s] K8s context injected: %s", room_id, k8s_context[:120])
                 messages.insert(1, {
                     "role": "system",
                     "content": f"[Cluster data for your reference: {k8s_context}]",
                 })
                 k8s_resolved = True
+            else:
+                logger.warning("[%s] K8s query matched but returned no context", room_id)
 
         # Web search — skip entirely if k8s already answered the question
-        if k8s_resolved or not self.search:
+        if k8s_resolved:
+            logger.debug("[%s] Skipping search: k8s already resolved", room_id)
+            return await self.ollama.chat(messages)
+        if not self.search:
+            logger.debug("[%s] Plain chat (search disabled)", room_id)
             return await self.ollama.chat(messages)
 
-        if not _explicit_search_request(prompt):
+        if _explicit_search_request(prompt):
+            logger.info("[%s] Explicit search request detected", room_id)
+        else:
             needs_search = await self.ollama.should_search(prompt)
             if not needs_search:
+                logger.debug("[%s] Search gate: not needed, plain chat", room_id)
                 return await self.ollama.chat(messages)
+            logger.info("[%s] Search gate: search needed", room_id)
 
         msg = await self.ollama.chat_with_tools(messages, [WEB_SEARCH_TOOL])
         tool_calls = msg.get("tool_calls") or []
 
         if not tool_calls:
+            logger.debug("[%s] Web search: model returned no tool calls, using direct response", room_id)
             return msg.get("content", "")
 
         tool_blocks: list[str] = []
@@ -349,7 +365,10 @@ class MatrixLLMBot:
         # Translate aliases before the LLM sees the message
         translated = prompt
         for alias, real_name in self.config.k8s_aliases.items():
+            before = translated
             translated = re.sub(re.escape(alias), real_name, translated, flags=re.IGNORECASE)
+            if translated != before:
+                logger.debug("K8s alias translated: %r -> %r", alias, real_name)
 
         alias_context = ""
         if self.config.k8s_aliases:
@@ -362,18 +381,29 @@ class MatrixLLMBot:
         for service in self.config.k8s_services:
             if service.lower() in translated.lower() and service not in checked:
                 checked.add(service)
+                logger.info("K8s pre-fetch health: %s", service)
                 try:
-                    live_checks.append(await self.k8s.check_service_health(service))
+                    result = await self.k8s.check_service_health(service)
+                    logger.debug("K8s health result for %s: %s", service, result[:120])
+                    live_checks.append(result)
                 except Exception as exc:
+                    logger.warning("K8s health check failed for %s: %s", service, exc)
                     live_checks.append(f"Could not check {service}: {exc}")
         # Also check resolved alias targets
         for alias, real_name in self.config.k8s_aliases.items():
             if alias.lower() in prompt.lower() and real_name not in checked:
                 checked.add(real_name)
+                logger.info("K8s pre-fetch health (via alias %r): %s", alias, real_name)
                 try:
-                    live_checks.append(await self.k8s.check_service_health(real_name))
+                    result = await self.k8s.check_service_health(real_name)
+                    logger.debug("K8s health result for %s: %s", real_name, result[:120])
+                    live_checks.append(result)
                 except Exception as exc:
+                    logger.warning("K8s health check failed for %s: %s", real_name, exc)
                     live_checks.append(f"Could not check {real_name}: {exc}")
+
+        if not live_checks:
+            logger.debug("K8s: no specific services matched in prompt, relying on cluster_map only")
 
         live_section = (
             "\nLive service checks:\n" + "\n\n".join(live_checks) + "\n"
@@ -399,7 +429,9 @@ class MatrixLLMBot:
         # Only use tool calls for log requests (requires model to identify pod name)
         is_log_request = any(kw in translated.lower() for kw in ("log", "logs"))
         if is_log_request:
+            logger.info("K8s log request detected, sender=%s is_admin=%s", sender, sender in self.config.admins)
             if sender not in self.config.admins:
+                logger.info("K8s log request denied: %s is not an admin", sender)
                 return "Access denied: only admins can view logs."
             log_tools = [t for t in K8S_TOOLS if t["function"]["name"] == "k8s_get_logs"]
             msg = await self.ollama.chat_with_tools(messages, log_tools)
@@ -410,15 +442,19 @@ class MatrixLLMBot:
                     fn = call.get("function", {})
                     name = fn.get("name", "")
                     args = fn.get("arguments", {})
-                    logger.info("K8s tool: %s %s", name, args)
+                    logger.info("K8s tool call: %s %s", name, args)
                     try:
                         result = await self._execute_k8s_tool(name, args)
+                        logger.debug("K8s tool result: %s", result[:120])
                     except Exception as exc:
+                        logger.error("K8s tool error (%s): %s", name, exc)
                         result = f"K8s error: {exc}"
                     messages.append({"role": "tool", "content": result})
                 return await self.ollama.chat(messages)
+            logger.debug("K8s log request: model returned no tool calls")
             return msg.get("content", "")
 
+        logger.debug("K8s: synthesizing answer from cluster_map + live checks")
         return await self.ollama.chat(messages)
 
     async def _execute_k8s_tool(self, name: str, args: dict) -> str:

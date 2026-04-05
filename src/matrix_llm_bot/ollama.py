@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
+
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class OllamaClient:
@@ -53,6 +57,7 @@ class OllamaClient:
         )
         response.raise_for_status()
         answer = response.json()["message"]["content"].strip().upper()
+        logger.debug("Search gate: %r -> %s", message[:80], answer)
         return answer.startswith("Y")
 
     async def should_respond(self, bot_name: str, message: str) -> bool:
@@ -78,6 +83,7 @@ class OllamaClient:
         )
         response.raise_for_status()
         answer = response.json()["message"]["content"].strip().upper()
+        logger.debug("Respond gate: %r -> %s", message[:80], answer)
         return answer.startswith("Y")
 
     async def acknowledgment(self, system_prompt: str, query: str) -> str:
@@ -103,12 +109,17 @@ class OllamaClient:
 
     async def chat_with_tools(self, messages: list[dict], tools: list[dict]) -> dict:
         """Returns the raw assistant message dict (may contain tool_calls)."""
+        tool_names = [t["function"]["name"] for t in tools]
+        logger.debug("chat_with_tools: offering %s", tool_names)
         response = await self._client.post(
             f"{self.url}/api/chat",
             json={"model": self.model, "messages": messages, "tools": tools, "stream": False},
         )
         response.raise_for_status()
-        return response.json()["message"]
+        msg = response.json()["message"]
+        calls = [c.get("function", {}).get("name") for c in (msg.get("tool_calls") or [])]
+        logger.debug("chat_with_tools: model called %s", calls if calls else "no tools")
+        return msg
 
     async def aclose(self) -> None:
         await self._client.aclose()
