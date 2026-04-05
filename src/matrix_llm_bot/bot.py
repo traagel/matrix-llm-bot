@@ -209,6 +209,16 @@ class MatrixLLMBot:
             return
         logger.debug("[%s] Mention detected from %s: %r", room.room_id, event.sender, body[:120])
 
+        # Builtins and reset are deterministic — skip the gate entirely
+        if prompt.strip().lower() == "reset":
+            self._history.pop((room.room_id, event.sender), None)
+            await self._send(room.room_id, "Conversation history cleared.")
+            return
+
+        builtin = await self._handle_builtin_command(room.room_id, prompt, event.sender)
+        if builtin:
+            return
+
         try:
             if not await self.ollama.should_respond(self.config.bot_name, body, self.config.peer_bots):
                 logger.info("[%s] Gate rejected message from %s: %r", room.room_id, event.sender, body[:120])
@@ -218,15 +228,6 @@ class MatrixLLMBot:
             logger.warning("Gate call failed, proceeding anyway: %s", exc)
 
         logger.info("[%s] %s: %s", room.room_id, event.sender, prompt)
-
-        if prompt.strip().lower() == "reset":
-            self._history.pop((room.room_id, event.sender), None)
-            await self._send(room.room_id, "Conversation history cleared.")
-            return
-
-        builtin = await self._handle_builtin_command(room.room_id, prompt, event.sender)
-        if builtin:
-            return
 
         if event.sender in self.config.admins:
             handled = await self._handle_admin_command(room.room_id, prompt)
@@ -492,7 +493,7 @@ class MatrixLLMBot:
         """Deterministic commands that never go through the LLM. Returns True if handled."""
         lower = prompt.strip().lower()
 
-        if lower == "tools":
+        if lower in ("tools", "help"):
             lines = [f"Tools available to {self.config.bot_name}:"]
             lines.append(f"  model: {self.config.ollama.model}")
             if self.config.ollama.routing_model and self.config.ollama.routing_model != self.config.ollama.model:
@@ -522,13 +523,16 @@ class MatrixLLMBot:
         if lower.startswith("k8s ") and self.k8s:
             rest = prompt.strip()[4:].strip()
             if rest:
-                # k8s version <service> or k8s <service>
-                if rest.lower().startswith("version "):
+                rest_lower = rest.lower()
+                if rest_lower.startswith("version "):
                     service = rest[8:].strip()
                     cmd = "version"
-                elif rest.lower() == "health" or rest.lower().startswith("health "):
+                elif rest_lower == "health" or rest_lower.startswith("health "):
                     service = rest[7:].strip() if len(rest) > 6 else ""
                     cmd = "health"
+                elif rest_lower.startswith("status "):
+                    service = rest[7:].strip()
+                    cmd = "status"
                 else:
                     service = rest
                     cmd = "status"
