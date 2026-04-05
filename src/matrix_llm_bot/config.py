@@ -34,7 +34,7 @@ class Config:
     ollama: OllamaConfig
     rooms: list[str]
     admins: list[str]
-    history_size: int
+    history_size: int = 0
     bot_name: str
     system_prompt: str = ""
     peer_bots: list[str] = field(default_factory=list)
@@ -75,7 +75,7 @@ class Config:
             ),
             rooms=data.get("rooms", []),
             admins=data.get("admins", []),
-            history_size=int(data.get("history_size", 20)),
+            history_size=int(data.get("history_size", 0)),
             bot_name=data.get("bot_name", "llm-bot"),
             system_prompt=data.get("system_prompt", ""),
             peer_bots=data.get("peer_bots", []),

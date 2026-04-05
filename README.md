@@ -79,7 +79,7 @@ cp config.example.json config.json
 | `ollama.routing_model` | No | Small fast model for yes/no gate calls (e.g. `llama3.2:1b`). Falls back to main model. |
 | `rooms` | Yes | List of room IDs the bot should join |
 | `admins` | No | Matrix user IDs with admin privileges (avatar command, k8s logs) |
-| `history_size` | No | Messages to keep per user per room (default: 20) |
+| `history_size` | No | Messages to keep per user per room (default: 0 — no history) |
 | `bot_name` | No | Display name set on login, also used as mention trigger |
 | `peer_bots` | No | Names of other bots in the same room (e.g. `["stephen"]`). The gate uses this to avoid responding to messages clearly directed at a peer. |
 | `system_prompt` | No | Persona/instructions prepended to every LLM call |

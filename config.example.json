@@ -12,7 +12,7 @@
   },
   "rooms": ["!roomid:example.com"],
   "admins": ["@admin:example.com"],
-  "history_size": 20,
+  "history_size": 0,
   "bot_name": "llm-bot",
   "peer_bots": [],
   "system_prompt": "",
