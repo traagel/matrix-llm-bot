@@ -493,8 +493,27 @@ class MatrixLLMBot:
         """Deterministic commands that never go through the LLM. Returns True if handled."""
         lower = prompt.strip().lower()
 
-        if lower in ("tools", "help"):
-            lines = [f"Tools available to {self.config.bot_name}:"]
+        if lower == "help":
+            n = self.config.bot_name
+            lines = [f"{n} commands:"]
+            lines.append(f"  {n} help              — this message")
+            lines.append(f"  {n} tools             — show model and feature config")
+            lines.append(f"  {n} status            — on/off summary of all features")
+            lines.append(f"  {n} reset             — clear your conversation history")
+            if self.k8s:
+                lines.append(f"  {n} k8s health              — health of all pods")
+                lines.append(f"  {n} k8s health <service>    — health of matching pods")
+                lines.append(f"  {n} k8s status <service>    — deployment + pod detail")
+                lines.append(f"  {n} k8s version <service>   — image tags")
+            if self.search:
+                lines.append(f"  {n} <question>     — answer with web search if needed")
+            if self.config.ollama.vision_model:
+                lines.append(f"  [upload image] then {n} <question>  — vision")
+            await self._send(room_id, "\n".join(lines))
+            return True
+
+        if lower == "tools":
+            lines = [f"{self.config.bot_name} config:"]
             lines.append(f"  model: {self.config.ollama.model}")
             if self.config.ollama.routing_model and self.config.ollama.routing_model != self.config.ollama.model:
                 lines.append(f"  routing model: {self.config.ollama.routing_model}")
@@ -503,7 +522,7 @@ class MatrixLLMBot:
             if self.search:
                 lines.append(f"  web search: {self.config.searxng_url}")
             if self.k8s:
-                lines.append(f"  k8s: enabled (services: {', '.join(self.config.k8s_services) or 'none configured'})")
+                lines.append(f"  k8s services: {', '.join(self.config.k8s_services) or 'none configured'}")
             if self.config.peer_bots:
                 lines.append(f"  peer bots: {', '.join(self.config.peer_bots)}")
             lines.append(f"  history: {self.config.history_size} messages per user")
