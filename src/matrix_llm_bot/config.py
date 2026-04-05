@@ -34,8 +34,8 @@ class Config:
     ollama: OllamaConfig
     rooms: list[str]
     admins: list[str]
-    history_size: int = 0
     bot_name: str
+    history_size: int = 0
     system_prompt: str = ""
     peer_bots: list[str] = field(default_factory=list)
     searxng_url: str = ""
