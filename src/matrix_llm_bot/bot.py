@@ -2,135 +2,22 @@ from __future__ import annotations
 
 import base64
 import html as html_module
-import io
 import logging
-import mimetypes
 import re
 import time
-from collections import deque
-from datetime import datetime, timezone
 
-import httpx
-from nio import AsyncClient, MatrixRoom, RoomMessageImage, RoomMessageText, UploadResponse
+from nio import AsyncClient, MatrixRoom, RoomMessageImage, RoomMessageText
 
 from .config import Config
-from .k8s import K8sClient
-from .ollama import OllamaClient
-from .search import SearXNGClient
+from .handlers.commands import CommandHandler
+from .handlers.reply import ConversationHistory, ReplyHandler
+from .integrations.k8s import K8sClient
+from .integrations.ollama import OllamaClient
+from .integrations.search import SearXNGClient
 
 logger = logging.getLogger(__name__)
 
 IMAGE_TTL = 120  # seconds before a pending image is discarded
-
-K8S_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "k8s_check_health",
-            "description": "Check if a specific service/deployment is healthy and running in the k3s cluster.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "service_name": {"type": "string", "description": "Name of the service to check"},
-                },
-                "required": ["service_name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "k8s_get_pods",
-            "description": "List pods and their status. Optionally filter by namespace.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "namespace": {"type": "string", "description": "Namespace to filter by. Empty = all."},
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "k8s_get_logs",
-            "description": "Get recent logs from a pod.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "namespace": {"type": "string", "description": "Namespace the pod is in"},
-                    "pod_name": {"type": "string", "description": "Full or partial pod name"},
-                    "tail_lines": {"type": "integer", "description": "Number of log lines (default 30)"},
-                },
-                "required": ["namespace", "pod_name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "k8s_list_namespaces",
-            "description": "List all namespaces in the cluster.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "k8s_get_deployments",
-            "description": "List deployments and replica status. Optionally filter by namespace.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "namespace": {"type": "string", "description": "Namespace to filter by. Empty = all."},
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "k8s_get_services",
-            "description": "List Kubernetes services and their ports. Optionally filter by namespace.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "namespace": {"type": "string", "description": "Namespace to filter by. Empty = all."},
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "k8s_cluster_map",
-            "description": "Get a full map of the cluster: namespaces, deployments with images/versions, services.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-]
-
-WEB_SEARCH_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "web_search",
-        "description": (
-            "Search the web for current, real-time, or factual information you do not already know. "
-            "Only use this for explicit questions about news, current events, prices, weather, or facts. "
-            "Do NOT use for greetings, casual conversation, opinions, or anything you can answer yourself."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query"},
-            },
-            "required": ["query"],
-        },
-    },
-}
 
 
 class MatrixLLMBot:
@@ -140,9 +27,10 @@ class MatrixLLMBot:
         self.ollama = OllamaClient(config.ollama.url, config.ollama.model, config.ollama.routing_model)
         self.search = SearXNGClient(config.searxng_url) if config.searxng_url else None
         self.k8s = K8sClient() if config.k8s_enabled else None
-        self._cluster_map_cache: str = ""
-        self._cluster_map_cache_time: float = 0.0
-        self._history: dict[tuple[str, str], deque[dict]] = {}
+
+        self._reply_handler = ReplyHandler(config, self.ollama, self.k8s, self.search)
+        self._command_handler = CommandHandler(config, self.client, self.k8s, bool(self.search), self._send)
+        self._history = ConversationHistory(config.history_size)
         self._pending_images: dict[tuple[str, str], tuple[bytes, float]] = {}
         self._seen_events: set[str] = set()
         self._started = False
@@ -178,23 +66,17 @@ class MatrixLLMBot:
             await self.client.close()
 
     async def _on_image(self, room: MatrixRoom, event: RoomMessageImage) -> None:
-        if not self._started:
+        if not self._started or event.sender == self.client.user_id:
             return
-        if event.sender == self.client.user_id:
-            return
-
         logger.info("[%s] %s sent an image, storing as pending", room.room_id, event.sender)
         response = await self.client.download(event.url)
         if not hasattr(response, "body"):
             logger.error("Failed to download image: %s", response)
             return
-
         self._pending_images[(room.room_id, event.sender)] = (response.body, time.monotonic())
 
     async def _on_message(self, room: MatrixRoom, event: RoomMessageText) -> None:
-        if not self._started:
-            return
-        if event.sender == self.client.user_id:
+        if not self._started or event.sender == self.client.user_id:
             return
 
         if event.event_id in self._seen_events:
@@ -204,35 +86,33 @@ class MatrixLLMBot:
             self._seen_events.clear()
 
         body = event.body.strip()
+        explicit_mention = _is_explicit_mention(event.source, self.client.user_id)
         prompt = _extract_prompt(body, self.config.bot_name, self.client.user_id, event.source)
         if prompt is None:
             return
         logger.debug("[%s] Mention detected from %s: %r", room.room_id, event.sender, body[:120])
 
-        # Builtins and reset are deterministic — skip the gate entirely
         if prompt.strip().lower() == "reset":
-            self._history.pop((room.room_id, event.sender), None)
+            self._history.clear(room.room_id, event.sender)
             await self._send(room.room_id, "Conversation history cleared.")
             return
 
-        builtin = await self._handle_builtin_command(room.room_id, prompt, event.sender)
-        if builtin:
+        if await self._command_handler.handle(room.room_id, prompt, event.sender):
             return
 
-        try:
-            if not await self.ollama.should_respond(self.config.bot_name, body, self.config.peer_bots):
-                logger.info("[%s] Gate rejected message from %s: %r", room.room_id, event.sender, body[:120])
-                return
-            logger.debug("[%s] Gate accepted message from %s", room.room_id, event.sender)
-        except Exception as exc:
-            logger.warning("Gate call failed, proceeding anyway: %s", exc)
+        # Skip the LLM gate when the bot was explicitly mentioned via m.mentions —
+        # the user unambiguously addressed us. Only run it for name-based detection
+        # where a peer bot might be the real target.
+        if not explicit_mention:
+            try:
+                if not await self.ollama.should_respond(self.config.bot_name, body, self.config.peer_bots):
+                    logger.info("[%s] Gate rejected message from %s: %r", room.room_id, event.sender, body[:120])
+                    return
+                logger.debug("[%s] Gate accepted message from %s", room.room_id, event.sender)
+            except Exception as exc:
+                logger.warning("Gate call failed, proceeding anyway: %s", exc)
 
         logger.info("[%s] %s: %s", room.room_id, event.sender, prompt)
-
-        if event.sender in self.config.admins:
-            handled = await self._handle_admin_command(room.room_id, prompt)
-            if handled:
-                return
 
         image_b64: str | None = None
         pending = self._pending_images.pop((room.room_id, event.sender), None)
@@ -244,378 +124,40 @@ class MatrixLLMBot:
             else:
                 logger.info("[%s] Pending image from %s expired, discarding", room.room_id, event.sender)
 
-        history = self._get_history(room.room_id, event.sender)
-        if image_b64:
-            history.append({"role": "user", "content": f"[image] {prompt}"})
-        else:
-            history.append({"role": "user", "content": prompt})
+        history = self._history.get(room.room_id, event.sender)
+        history.append({"role": "user", "content": f"[image] {prompt}" if image_b64 else prompt})
 
         await self.client.room_typing(room.room_id, typing_state=True, timeout=120_000)
+        reply: str | None = None
         try:
-            reply = await self._llm_reply(
-                list(history), prompt=prompt, image_b64=image_b64,
-                room=room, sender=event.sender,
+            reply = await self._reply_handler.reply(
+                list(history),
+                prompt=prompt,
+                image_b64=image_b64,
+                room=room,
+                sender=event.sender,
             )
         except Exception as exc:
             logger.error("LLM error: %s", exc)
-            await self.client.room_typing(room.room_id, typing_state=False)
             await self._send(room.room_id, f"Error: {exc}")
-            history.pop()
-            return
         finally:
             await self.client.room_typing(room.room_id, typing_state=False)
+            if reply is None:
+                history.pop()
 
-        history.append({"role": "assistant", "content": reply})
-        logger.info("[%s] -> %s", room.room_id, reply[:120])
-        await self._send_reply(room, event.sender, reply)
-
-    async def _llm_reply(
-        self,
-        history: list[dict],
-        prompt: str,
-        image_b64: str | None = None,
-        room: MatrixRoom | None = None,
-        sender: str | None = None,
-    ) -> str:
-        room_id = room.room_id if room else None
-        messages = list(history)
-        system = _build_system_prompt(self.config.system_prompt, room=room, sender=sender)
-        messages.insert(0, {"role": "system", "content": system})
-
-        if image_b64:
-            logger.info("[%s] Vision path: model=%s", room_id, self.config.ollama.vision_model)
-            return await self.ollama.chat_with_image(
-                messages, image_b64, model=self.config.ollama.vision_model
-            )
-
-        # K8s: separate context window — resolve first, inject short result
-        k8s_resolved = False
-        is_k8s = self.k8s and _is_k8s_query(prompt, self.config.k8s_keywords, self.config.k8s_services, self.config.k8s_aliases)
-        logger.debug("[%s] K8s query detection: %s", room_id, bool(is_k8s))
-        if is_k8s:
-            if room_id:
-                try:
-                    ack = await self.ollama.acknowledgment(system, "the cluster status")
-                    await self._send(room_id, ack)
-                except Exception:
-                    pass
-            k8s_context = await self._handle_k8s_query(prompt, sender=sender)
-            if k8s_context:
-                logger.info("[%s] K8s context injected: %s", room_id, k8s_context[:120])
-                messages.insert(1, {
-                    "role": "system",
-                    "content": f"[Cluster data for your reference: {k8s_context}]",
-                })
-                k8s_resolved = True
-            else:
-                logger.warning("[%s] K8s query matched but returned no context", room_id)
-
-        # Web search — skip entirely if k8s already answered the question
-        if k8s_resolved:
-            logger.debug("[%s] Skipping search: k8s already resolved", room_id)
-            return await self.ollama.chat(messages)
-        if not self.search:
-            logger.debug("[%s] Plain chat (search disabled)", room_id)
-            return await self.ollama.chat(messages)
-
-        if _explicit_search_request(prompt):
-            logger.info("[%s] Explicit search request detected", room_id)
-        else:
-            needs_search = await self.ollama.should_search(prompt)
-            if not needs_search:
-                logger.debug("[%s] Search gate: not needed, plain chat", room_id)
-                return await self.ollama.chat(messages)
-            logger.info("[%s] Search gate: search needed", room_id)
-
-        msg = await self.ollama.chat_with_tools(messages, [WEB_SEARCH_TOOL])
-        tool_calls = msg.get("tool_calls") or []
-
-        if not tool_calls:
-            logger.debug("[%s] Web search: model returned no tool calls, using direct response", room_id)
-            return msg.get("content", "")
-
-        tool_blocks: list[str] = []
-        for call in tool_calls:
-            fn = call.get("function", {})
-            if fn.get("name") == "web_search":
-                query = fn.get("arguments", {}).get("query", "")
-                logger.info("Web search: %s", query)
-                if room_id:
-                    try:
-                        ack = await self.ollama.acknowledgment(system, query)
-                        await self._send(room_id, ack)
-                    except Exception:
-                        pass
-                results = await self.search.search(query)
-                tool_blocks.append("\n\n".join(
-                    f"{r['title']}\n{r['url']}\n{r['content']}" for r in results
-                ))
-
-        synthesis_instruction = (
-            "You have been given web search results below. "
-            "Synthesize the information into a clear, concise answer. "
-            "Do not list raw URLs or copy-paste snippets — respond naturally."
-        )
-        synthesis_messages = [
-            {"role": "system", "content": system + "\n\n" + synthesis_instruction},
-            {"role": "user", "content": prompt},
-            {"role": "tool", "content": "\n\n---\n\n".join(tool_blocks)},
-        ]
-        return await self.ollama.chat(synthesis_messages)
-
-    async def _handle_k8s_query(self, prompt: str, sender: str | None = None) -> str:
-        """Separate context window: resolve a k8s query factually, return a short string."""
-        cluster_map = await self._get_cached_cluster_map()
-
-        # Translate aliases before the LLM sees the message
-        translated = prompt
-        for alias, real_name in self.config.k8s_aliases.items():
-            before = translated
-            translated = re.sub(re.escape(alias), real_name, translated, flags=re.IGNORECASE)
-            if translated != before:
-                logger.debug("K8s alias translated: %r -> %r", alias, real_name)
-
-        alias_context = ""
-        if self.config.k8s_aliases:
-            mappings = ", ".join(f'"{k}" = {v}' for k, v in self.config.k8s_aliases.items())
-            alias_context = f"\nService aliases: {mappings}. Translate these names when looking up services.\n"
-
-        # Pre-fetch live health for any mentioned services — don't rely on the model to call tools
-        live_checks: list[str] = []
-        checked: set[str] = set()
-        for service in self.config.k8s_services:
-            if service.lower() in translated.lower() and service not in checked:
-                checked.add(service)
-                logger.info("K8s pre-fetch health: %s", service)
-                try:
-                    result = await self.k8s.check_service_health(service)
-                    logger.debug("K8s health result for %s: %s", service, result[:120])
-                    live_checks.append(result)
-                except Exception as exc:
-                    logger.warning("K8s health check failed for %s: %s", service, exc)
-                    live_checks.append(f"Could not check {service}: {exc}")
-        # Also check resolved alias targets
-        for alias, real_name in self.config.k8s_aliases.items():
-            if alias.lower() in prompt.lower() and real_name not in checked:
-                checked.add(real_name)
-                logger.info("K8s pre-fetch health (via alias %r): %s", alias, real_name)
-                try:
-                    result = await self.k8s.check_service_health(real_name)
-                    logger.debug("K8s health result for %s: %s", real_name, result[:120])
-                    live_checks.append(result)
-                except Exception as exc:
-                    logger.warning("K8s health check failed for %s: %s", real_name, exc)
-                    live_checks.append(f"Could not check {real_name}: {exc}")
-
-        if not live_checks:
-            logger.debug("K8s: no specific services matched in prompt, relying on cluster_map only")
-
-        live_section = (
-            "\nLive service checks:\n" + "\n\n".join(live_checks) + "\n"
-            if live_checks else ""
-        )
-
-        k8s_system = (
-            "You are a Kubernetes cluster assistant. "
-            "Below is the current cluster state.\n\n"
-            f"{cluster_map}\n"
-            f"{live_section}"
-            f"{alias_context}\n"
-            "Answer the user's question using ONLY this data. "
-            "Include exact image tags as versions. "
-            "Reply in plain prose — one or two sentences. "
-            "No JSON, no markdown, no bullet points, no structured data."
-        )
-        messages: list[dict] = [
-            {"role": "system", "content": k8s_system},
-            {"role": "user", "content": translated},
-        ]
-
-        # Only use tool calls for log requests (requires model to identify pod name)
-        is_log_request = any(kw in translated.lower() for kw in ("log", "logs"))
-        if is_log_request:
-            logger.info("K8s log request detected, sender=%s is_admin=%s", sender, sender in self.config.admins)
-            if sender not in self.config.admins:
-                logger.info("K8s log request denied: %s is not an admin", sender)
-                return "Access denied: only admins can view logs."
-            log_tools = [t for t in K8S_TOOLS if t["function"]["name"] == "k8s_get_logs"]
-            msg = await self.ollama.chat_with_tools(messages, log_tools)
-            tool_calls = msg.get("tool_calls") or []
-            if tool_calls:
-                messages.append(msg)
-                for call in tool_calls:
-                    fn = call.get("function", {})
-                    name = fn.get("name", "")
-                    args = fn.get("arguments", {})
-                    logger.info("K8s tool call: %s %s", name, args)
-                    try:
-                        result = await self._execute_k8s_tool(name, args)
-                        logger.debug("K8s tool result: %s", result[:120])
-                    except Exception as exc:
-                        logger.error("K8s tool error (%s): %s", name, exc)
-                        result = f"K8s error: {exc}"
-                    messages.append({"role": "tool", "content": result})
-                return await self.ollama.chat(messages)
-            logger.debug("K8s log request: model returned no tool calls")
-            return msg.get("content", "")
-
-        logger.debug("K8s: synthesizing answer from cluster_map + live checks")
-        return await self.ollama.chat(messages)
-
-    async def _execute_k8s_tool(self, name: str, args: dict) -> str:
-        if name == "k8s_check_health":
-            return await self.k8s.check_service_health(args["service_name"])
-        if name == "k8s_get_pods":
-            return await self.k8s.get_pods(args.get("namespace", ""))
-        if name == "k8s_get_logs":
-            return await self.k8s.get_logs(
-                args["namespace"], args["pod_name"], args.get("tail_lines", 30)
-            )
-        if name == "k8s_list_namespaces":
-            return await self.k8s.list_namespaces()
-        if name == "k8s_get_deployments":
-            return await self.k8s.get_deployments(args.get("namespace", ""))
-        if name == "k8s_get_services":
-            return await self.k8s.get_services(args.get("namespace", ""))
-        if name == "k8s_cluster_map":
-            return await self.k8s.cluster_map()
-        return f"Unknown k8s tool: {name}"
-
-    async def _get_cached_cluster_map(self) -> str:
-        now = time.monotonic()
-        if self._cluster_map_cache and (now - self._cluster_map_cache_time) < 60:
-            return self._cluster_map_cache
-        self._cluster_map_cache = await self.k8s.cluster_map()
-        self._cluster_map_cache_time = now
-        return self._cluster_map_cache
-
-    async def _handle_builtin_command(self, room_id: str, prompt: str, sender: str) -> bool:
-        """Deterministic commands that never go through the LLM. Returns True if handled."""
-        lower = prompt.strip().lower()
-
-        if lower == "help":
-            n = self.config.bot_name
-            lines = [f"{n} commands:"]
-            lines.append(f"  {n} help              — this message")
-            lines.append(f"  {n} tools             — show model and feature config")
-            lines.append(f"  {n} status            — on/off summary of all features")
-            lines.append(f"  {n} reset             — clear your conversation history")
-            if self.k8s:
-                lines.append(f"  {n} k8s health              — health of all pods")
-                lines.append(f"  {n} k8s health <service>    — health of matching pods")
-                lines.append(f"  {n} k8s status <service>    — deployment + pod detail")
-                lines.append(f"  {n} k8s version <service>   — image tags")
-            if self.search:
-                lines.append(f"  {n} <question>     — answer with web search if needed")
-            if self.config.ollama.vision_model:
-                lines.append(f"  [upload image] then {n} <question>  — vision")
-            await self._send(room_id, "\n".join(lines))
-            return True
-
-        if lower == "tools":
-            lines = [f"{self.config.bot_name} config:"]
-            lines.append(f"  model: {self.config.ollama.model}")
-            if self.config.ollama.routing_model and self.config.ollama.routing_model != self.config.ollama.model:
-                lines.append(f"  routing model: {self.config.ollama.routing_model}")
-            if self.config.ollama.vision_model:
-                lines.append(f"  vision: {self.config.ollama.vision_model}")
-            if self.search:
-                lines.append(f"  web search: {self.config.searxng_url}")
-            if self.k8s:
-                lines.append(f"  k8s services: {', '.join(self.config.k8s_services) or 'none configured'}")
-            if self.config.peer_bots:
-                lines.append(f"  peer bots: {', '.join(self.config.peer_bots)}")
-            lines.append(f"  history: {self.config.history_size} messages per user")
-            await self._send(room_id, "\n".join(lines))
-            return True
-
-        if lower == "status":
-            lines = [f"{self.config.bot_name} status:"]
-            lines.append(f"  model: {self.config.ollama.model}")
-            lines.append(f"  search: {'on' if self.search else 'off'}")
-            lines.append(f"  k8s: {'on' if self.k8s else 'off'}")
-            lines.append(f"  vision: {'on' if self.config.ollama.vision_model else 'off'}")
-            lines.append(f"  history: {self.config.history_size}")
-            await self._send(room_id, "\n".join(lines))
-            return True
-
-        if lower.startswith("k8s ") and self.k8s:
-            rest = prompt.strip()[4:].strip()
-            if rest:
-                rest_lower = rest.lower()
-                if rest_lower.startswith("version "):
-                    service = rest[8:].strip()
-                    cmd = "version"
-                elif rest_lower == "health" or rest_lower.startswith("health "):
-                    service = rest[7:].strip() if len(rest) > 6 else ""
-                    cmd = "health"
-                elif rest_lower.startswith("status "):
-                    service = rest[7:].strip()
-                    cmd = "status"
-                else:
-                    service = rest
-                    cmd = "status"
-                resolved = self.config.k8s_aliases.get(service.lower(), service)
-                logger.info("[%s] Builtin k8s %s for %r", room_id, cmd, resolved)
-                try:
-                    if cmd == "version":
-                        result = await self.k8s.service_version(resolved)
-                    elif cmd == "health":
-                        result = await self.k8s.service_health(resolved)
-                    else:
-                        result = await self.k8s.service_status(resolved)
-                except Exception as exc:
-                    result = f"K8s error: {exc}"
-                await self._send(room_id, result)
-                return True
-
-        return False
-
-    async def _handle_admin_command(self, room_id: str, prompt: str) -> bool:
-        lower = prompt.strip().lower()
-        if lower.startswith("avatar "):
-            url = prompt.strip()[7:].strip()
-            await self._set_avatar(room_id, url)
-            return True
-        return False
-
-    async def _set_avatar(self, room_id: str, url: str) -> None:
-        logger.info("Setting avatar from URL: %s", url)
-        try:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                image_data = response.content
-                content_type = response.headers.get("content-type", "").split(";")[0].strip()
-
-            if not content_type.startswith("image/"):
-                guessed, _ = mimetypes.guess_type(url)
-                content_type = guessed if guessed and guessed.startswith("image/") else "image/jpeg"
-
-            upload_resp, _ = await self.client.upload(
-                io.BytesIO(image_data),
-                content_type=content_type,
-                filesize=len(image_data),
-            )
-            if not isinstance(upload_resp, UploadResponse):
-                raise RuntimeError(f"Upload failed: {upload_resp}")
-
-            await self.client.set_avatar(upload_resp.content_uri)
-            logger.info("Avatar set to %s", upload_resp.content_uri)
-            await self._send(room_id, "Avatar updated.")
-        except Exception as exc:
-            logger.error("Failed to set avatar: %s", exc)
-            await self._send(room_id, f"Failed to set avatar: {exc}")
+        if reply is not None:
+            history.append({"role": "assistant", "content": reply})
+            logger.info("[%s] -> %s", room.room_id, reply[:120])
+            await self._send_reply(room, event.sender, reply)
 
     async def _send_reply(self, room: MatrixRoom, sender: str, text: str) -> None:
-        """Send a response with an @mention of the sender."""
         display_name = (
-            room.users[sender].display_name
-            if sender in room.users and room.users[sender].display_name
-            else sender
+            room.users[sender].display_name if sender in room.users and room.users[sender].display_name else sender
         )
         plain = f"{display_name}: {text}"
-        mention_html = f'<a href="https://matrix.to/#/{html_module.escape(sender)}">{html_module.escape(display_name)}</a>'
+        mention_html = (
+            f'<a href="https://matrix.to/#/{html_module.escape(sender)}">{html_module.escape(display_name)}</a>'
+        )
         formatted = f"{mention_html}: {html_module.escape(text)}"
         await self.client.room_send(
             room.room_id,
@@ -636,59 +178,14 @@ class MatrixLLMBot:
             content={"msgtype": "m.text", "body": text},
         )
 
-    def _get_history(self, room_id: str, sender: str) -> deque[dict]:
-        key = (room_id, sender)
-        if key not in self._history:
-            self._history[key] = deque(maxlen=self.config.history_size)
-        return self._history[key]
 
-
-def _is_k8s_query(prompt: str, keywords: list[str], services: list[str], aliases: dict[str, str] | None = None) -> bool:
-    words = set(re.sub(r"[^\w\s-]", " ", prompt.lower()).split())
-    all_terms = (
-        set(k.lower() for k in keywords)
-        | set(s.lower() for s in services)
-        | set(a.lower() for a in (aliases or {}))
-    )
-    return bool(words & all_terms)
-
-
-_EXPLICIT_SEARCH_PATTERNS = re.compile(
-    r"\b(search|look\s+it\s+up|look\s+up|use\s+the\s+internet|google|find\s+out|check\s+online|browse)\b",
-    re.IGNORECASE,
-)
-
-def _explicit_search_request(prompt: str) -> bool:
-    return bool(_EXPLICIT_SEARCH_PATTERNS.search(prompt))
-
-
-def _build_system_prompt(
-    base: str,
-    room: MatrixRoom | None = None,
-    sender: str | None = None,
-) -> str:
-    now = datetime.now(timezone.utc)
-    lines = [f"Current date and time: {now.strftime('%A, %Y-%m-%d %H:%M UTC')}"]
-
-    if room:
-        room_name = room.display_name or room.room_id
-        lines.append(f"Room: {room_name}")
-
-    if sender and room and sender in room.users:
-        display_name = room.users[sender].display_name or sender
-        lines.append(f"You are speaking with: {display_name} ({sender})")
-    elif sender:
-        lines.append(f"You are speaking with: {sender}")
-
-    context = "\n".join(lines)
-    if base:
-        return f"{base}\n\n[Context]\n{context}"
-    return f"[Context]\n{context}"
+def _is_explicit_mention(source: dict, user_id: str) -> bool:
+    """True when the Matrix event explicitly named this bot via m.mentions."""
+    return user_id in source.get("content", {}).get("m.mentions", {}).get("user_ids", [])
 
 
 def _is_mentioned(body: str, bot_name: str, user_id: str, source: dict) -> bool:
-    mentioned_ids = source.get("content", {}).get("m.mentions", {}).get("user_ids", [])
-    if user_id in mentioned_ids:
+    if _is_explicit_mention(source, user_id):
         return True
     if re.search(r"@?" + re.escape(bot_name), body, re.IGNORECASE):
         return True
@@ -702,7 +199,7 @@ def _extract_prompt(body: str, bot_name: str, user_id: str, source: dict) -> str
 
 
 def _strip_mention(body: str, bot_name: str, user_id: str) -> str:
-    mention = r"@?(?:" + re.escape(user_id) + r"|" + re.escape(bot_name) + r")"
+    mention = r"(?:" + re.escape(user_id) + r"|@?" + re.escape(bot_name) + r")"
     cleaned = re.sub(r"(?i)^\s*" + mention + r"[,:\s]*", "", body)
     cleaned = re.sub(r"(?i)[,:\s]*" + mention + r"\s*$", "", cleaned)
     return cleaned.strip() or body.strip()

@@ -2,6 +2,25 @@ from __future__ import annotations
 
 import httpx
 
+WEB_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": (
+            "Search the web for current, real-time, or factual information you do not already know. "
+            "Only use this for explicit questions about news, current events, prices, weather, or facts. "
+            "Do NOT use for greetings, casual conversation, opinions, or anything you can answer yourself."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
 
 class SearXNGClient:
     def __init__(self, url: str) -> None:

@@ -6,10 +6,33 @@ from pathlib import Path
 
 DEFAULT_K8S_KEYWORDS: list[str] = [
     # Kubernetes terms
-    "k8s", "k3s", "kubernetes", "cluster", "pod", "pods", "deploy", "deployment",
-    "namespace", "service", "node", "container", "replica", "restart",
-    "healthy", "health", "running", "status", "version", "logs", "log",
-    "up", "down", "crashed", "evicted", "pending", "oomkilled",
+    "k8s",
+    "k3s",
+    "kubernetes",
+    "cluster",
+    "pod",
+    "pods",
+    "deploy",
+    "deployment",
+    "namespace",
+    "service",
+    "node",
+    "container",
+    "replica",
+    "restart",
+    "healthy",
+    "health",
+    "running",
+    "status",
+    "version",
+    "logs",
+    "log",
+    "up",
+    "down",
+    "crashed",
+    "evicted",
+    "pending",
+    "oomkilled",
 ]
 
 
@@ -45,7 +68,7 @@ class Config:
     k8s_aliases: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def load(cls, path: str | Path) -> "Config":
+    def load(cls, path: str | Path) -> Config:
         data = json.loads(Path(path).read_text())
 
         matrix = data.get("matrix", {})
