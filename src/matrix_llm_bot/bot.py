@@ -224,6 +224,10 @@ class MatrixLLMBot:
             await self._send(room.room_id, "Conversation history cleared.")
             return
 
+        builtin = await self._handle_builtin_command(room.room_id, prompt, event.sender)
+        if builtin:
+            return
+
         if event.sender in self.config.admins:
             handled = await self._handle_admin_command(room.room_id, prompt)
             if handled:
@@ -483,6 +487,66 @@ class MatrixLLMBot:
         self._cluster_map_cache = await self.k8s.cluster_map()
         self._cluster_map_cache_time = now
         return self._cluster_map_cache
+
+    async def _handle_builtin_command(self, room_id: str, prompt: str, sender: str) -> bool:
+        """Deterministic commands that never go through the LLM. Returns True if handled."""
+        lower = prompt.strip().lower()
+
+        if lower == "tools":
+            lines = [f"Tools available to {self.config.bot_name}:"]
+            lines.append(f"  model: {self.config.ollama.model}")
+            if self.config.ollama.routing_model and self.config.ollama.routing_model != self.config.ollama.model:
+                lines.append(f"  routing model: {self.config.ollama.routing_model}")
+            if self.config.ollama.vision_model:
+                lines.append(f"  vision: {self.config.ollama.vision_model}")
+            if self.search:
+                lines.append(f"  web search: {self.config.searxng_url}")
+            if self.k8s:
+                lines.append(f"  k8s: enabled (services: {', '.join(self.config.k8s_services) or 'none configured'})")
+            if self.config.peer_bots:
+                lines.append(f"  peer bots: {', '.join(self.config.peer_bots)}")
+            lines.append(f"  history: {self.config.history_size} messages per user")
+            await self._send(room_id, "\n".join(lines))
+            return True
+
+        if lower == "status":
+            lines = [f"{self.config.bot_name} status:"]
+            lines.append(f"  model: {self.config.ollama.model}")
+            lines.append(f"  search: {'on' if self.search else 'off'}")
+            lines.append(f"  k8s: {'on' if self.k8s else 'off'}")
+            lines.append(f"  vision: {'on' if self.config.ollama.vision_model else 'off'}")
+            lines.append(f"  history: {self.config.history_size}")
+            await self._send(room_id, "\n".join(lines))
+            return True
+
+        if lower.startswith("k8s ") and self.k8s:
+            rest = prompt.strip()[4:].strip()
+            if rest:
+                # k8s version <service> or k8s <service>
+                if rest.lower().startswith("version "):
+                    service = rest[8:].strip()
+                    cmd = "version"
+                elif rest.lower() == "health" or rest.lower().startswith("health "):
+                    service = rest[7:].strip() if len(rest) > 6 else ""
+                    cmd = "health"
+                else:
+                    service = rest
+                    cmd = "status"
+                resolved = self.config.k8s_aliases.get(service.lower(), service)
+                logger.info("[%s] Builtin k8s %s for %r", room_id, cmd, resolved)
+                try:
+                    if cmd == "version":
+                        result = await self.k8s.service_version(resolved)
+                    elif cmd == "health":
+                        result = await self.k8s.service_health(resolved)
+                    else:
+                        result = await self.k8s.service_status(resolved)
+                except Exception as exc:
+                    result = f"K8s error: {exc}"
+                await self._send(room_id, result)
+                return True
+
+        return False
 
     async def _handle_admin_command(self, room_id: str, prompt: str) -> bool:
         lower = prompt.strip().lower()

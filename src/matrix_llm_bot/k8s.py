@@ -120,6 +120,123 @@ class K8sClient:
             lines.append(f"{ns}/{name}: {stype} ports=[{ports}]")
         return "\n".join(lines) if lines else "No services found"
 
+    async def service_status(self, service_name: str) -> str:
+        """Deterministic status report for a named service across all namespaces."""
+        await self._ensure_client()
+        v1 = client.CoreV1Api(api_client=self._api_client)
+        apps = client.AppsV1Api(api_client=self._api_client)
+
+        deps = await apps.list_deployment_for_all_namespaces()
+        pods = await v1.list_pod_for_all_namespaces()
+
+        matched_deps = [
+            d for d in deps.items
+            if service_name.lower() in d.metadata.name.lower()
+        ]
+        matched_pods = [
+            p for p in pods.items
+            if service_name.lower() in p.metadata.name.lower()
+        ]
+
+        if not matched_deps and not matched_pods:
+            return f"No deployment or pods found matching '{service_name}'"
+
+        lines: list[str] = []
+        for d in matched_deps:
+            ns = d.metadata.namespace
+            name = d.metadata.name
+            ready = d.status.ready_replicas or 0
+            desired = d.spec.replicas or 0
+            health = "HEALTHY" if ready == desired and desired > 0 else "UNHEALTHY"
+            images = [c.image for c in d.spec.template.spec.containers]
+            lines.append(f"deploy/{ns}/{name}: {health} ({ready}/{desired} replicas)")
+            for img in images:
+                lines.append(f"  image: {img}")
+
+        for p in matched_pods:
+            ns = p.metadata.namespace
+            name = p.metadata.name
+            phase = p.status.phase or "Unknown"
+            cs = p.status.container_statuses or []
+            ready = sum(1 for c in cs if c.ready)
+            total = len(cs)
+            restarts = sum(c.restart_count for c in cs)
+            lines.append(f"pod/{ns}/{name}: {phase} ({ready}/{total} ready, {restarts} restarts)")
+
+        return "\n".join(lines)
+
+    async def service_health(self, service_name: str = "") -> str:
+        """Pod-level health summary: healthy/total count, names of unhealthy pods.
+        If service_name is empty, reports on all pods in the cluster."""
+        await self._ensure_client()
+        v1 = client.CoreV1Api(api_client=self._api_client)
+        pods = await v1.list_pod_for_all_namespaces()
+
+        if service_name:
+            matched = [
+                p for p in pods.items
+                if service_name.lower() in p.metadata.name.lower()
+            ]
+            if not matched:
+                return f"No pods found matching '{service_name}'"
+            label = service_name
+        else:
+            matched = [
+                p for p in pods.items
+                if not (p.metadata.namespace or "").startswith("kube-")
+            ]
+            if not matched:
+                return "No pods found"
+            label = "cluster"
+
+        healthy = []
+        unhealthy = []
+        for p in matched:
+            ns = p.metadata.namespace
+            name = p.metadata.name
+            phase = p.status.phase or "Unknown"
+            cs = p.status.container_statuses or []
+            all_ready = bool(cs) and all(c.ready for c in cs)
+            restarts = sum(c.restart_count for c in cs)
+            # Collect reason for unhealthy pods
+            reason = ""
+            for c in cs:
+                if not c.ready:
+                    state = c.state
+                    if state.waiting and state.waiting.reason:
+                        reason = state.waiting.reason
+                    elif state.terminated and state.terminated.reason:
+                        reason = state.terminated.reason
+            if phase == "Running" and all_ready:
+                healthy.append(f"{ns}/{name}")
+            else:
+                detail = f"{phase}"
+                if reason:
+                    detail += f"/{reason}"
+                if restarts:
+                    detail += f", {restarts} restarts"
+                unhealthy.append(f"  UNHEALTHY: {ns}/{name} ({detail})")
+
+        total = len(matched)
+        h_count = len(healthy)
+        lines = [f"{label}: {h_count}/{total} pods healthy"]
+        lines.extend(unhealthy)
+        return "\n".join(lines)
+
+    async def service_version(self, service_name: str) -> str:
+        """Return image tags for all deployments matching service_name across all namespaces."""
+        await self._ensure_client()
+        apps = client.AppsV1Api(api_client=self._api_client)
+        deps = await apps.list_deployment_for_all_namespaces()
+        lines = []
+        for d in deps.items:
+            if service_name.lower() in d.metadata.name.lower():
+                ns = d.metadata.namespace
+                name = d.metadata.name
+                images = [c.image for c in d.spec.template.spec.containers]
+                lines.append(f"{ns}/{name}: {', '.join(images)}")
+        return "\n".join(lines) if lines else f"No deployment matching '{service_name}' found"
+
     async def check_service_health(self, service_name: str) -> str:
         await self._ensure_client()
         apps = client.AppsV1Api(api_client=self._api_client)
