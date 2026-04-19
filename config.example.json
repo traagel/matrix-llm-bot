@@ -8,7 +8,9 @@
     "url": "http://localhost:11434",
     "model": "llama3.1:8b",
     "vision_model": "llava:7b",
-    "routing_model": "llama3.2:1b"
+    "routing_model": "llama3.2:1b",
+    "api_kind": "ollama",
+    "api_key": ""
   },
   "rooms": ["!roomid:example.com"],
   "admins": ["@admin:example.com"],

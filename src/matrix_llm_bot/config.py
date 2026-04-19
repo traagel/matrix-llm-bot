@@ -49,6 +49,8 @@ class OllamaConfig:
     model: str
     vision_model: str = ""
     routing_model: str = ""
+    api_kind: str = "ollama"
+    api_key: str = ""
 
 
 @dataclass
@@ -84,6 +86,10 @@ class Config:
         if missing:
             raise ValueError(f"Missing required config fields: {', '.join(missing)}")
 
+        api_kind = ollama.get("api_kind", "ollama")
+        if api_kind not in ("ollama", "openai"):
+            raise ValueError(f"ollama.api_kind must be 'ollama' or 'openai', got {api_kind!r}")
+
         return cls(
             matrix=MatrixConfig(
                 server=matrix["server"],
@@ -95,6 +101,8 @@ class Config:
                 model=ollama["model"],
                 vision_model=ollama.get("vision_model", ""),
                 routing_model=ollama.get("routing_model", ""),
+                api_kind=ollama.get("api_kind", "ollama"),
+                api_key=ollama.get("api_key", ""),
             ),
             rooms=data.get("rooms", []),
             admins=data.get("admins", []),

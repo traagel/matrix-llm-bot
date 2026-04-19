@@ -24,7 +24,13 @@ class MatrixLLMBot:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.client = AsyncClient(config.matrix.server, config.matrix.username)
-        self.ollama = OllamaClient(config.ollama.url, config.ollama.model, config.ollama.routing_model)
+        self.ollama = OllamaClient(
+            config.ollama.url,
+            config.ollama.model,
+            config.ollama.routing_model,
+            api_kind=config.ollama.api_kind,
+            api_key=config.ollama.api_key,
+        )
         self.search = SearXNGClient(config.searxng_url) if config.searxng_url else None
         self.k8s = K8sClient() if config.k8s_enabled else None
 
